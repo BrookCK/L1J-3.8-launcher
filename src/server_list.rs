@@ -274,6 +274,7 @@ pub struct AuxConfig {
     pub dynamic_dialog_enabled: bool,  // 動態對話檔
     pub pickup_toast_enabled: bool,    // 左下道具提示(撿物 toast)
     pub exp_drift_enabled: bool,       // 金幣經驗值提示(畫面飄字)
+    pub internal_bot_enabled: bool,    // 內掛系統(自動打怪/回城/補貨)
     pub inventory_limit_value: u32,
     pub img_limit_value: u32,
     pub text_encoding: TextEncodingMode,
@@ -296,6 +297,7 @@ impl Default for AuxConfig {
             dynamic_dialog_enabled: true,
             pickup_toast_enabled: true,
             exp_drift_enabled: true,
+            internal_bot_enabled: false,
             inventory_limit_value: DEFAULT_INVENTORY_LIMIT_VALUE,
             img_limit_value: DEFAULT_IMG_LIMIT_VALUE,
             text_encoding: TextEncodingMode::Big5,
@@ -425,6 +427,7 @@ pub fn parse_list_file(content: &str) -> Result<ListFile> {
                     "dynamic_dialog_enabled" => aux.dynamic_dialog_enabled = v,
                     "pickup_toast_enabled" => aux.pickup_toast_enabled = v,
                     "exp_drift_enabled" => aux.exp_drift_enabled = v,
+                    "internal_bot_enabled" => aux.internal_bot_enabled = v,
                     "inventory_limit_value" => {
                         aux.inventory_limit_value = parse_u32_clamped(
                             value,
@@ -533,6 +536,10 @@ pub fn build_list_file(file: &ListFile) -> Result<String> {
         a.pickup_toast_enabled
     ));
     out.push_str(&format!("exp_drift_enabled={}\n", a.exp_drift_enabled));
+    out.push_str(&format!(
+        "internal_bot_enabled={}\n",
+        a.internal_bot_enabled
+    ));
     out.push_str("\n[launcher]\n");
     let l = &file.launcher;
     out.push_str(&format!("active_skin={}\n", l.active_skin));
@@ -698,10 +705,9 @@ mod tests {
     /// 撿物 toast / EXP 飄字 兩個 toggle 走 parse → build round-trip 必須保留值
     #[test]
     fn pickup_and_exp_toggles_roundtrip() {
-        let parsed = parse_list_file(
-            "[aux]\npickup_toast_enabled=false\nexp_drift_enabled=false\n",
-        )
-        .unwrap();
+        let parsed =
+            parse_list_file("[aux]\npickup_toast_enabled=false\nexp_drift_enabled=false\n")
+                .unwrap();
         assert!(!parsed.aux.pickup_toast_enabled);
         assert!(!parsed.aux.exp_drift_enabled);
 

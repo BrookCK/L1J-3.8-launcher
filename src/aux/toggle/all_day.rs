@@ -271,14 +271,6 @@ impl Toggle for AllDay {
         }
         Ok(())
     }
-
-    fn is_safe(&self) -> bool {
-        true
-    }
-
-    fn name(&self) -> &'static str {
-        "all_day"
-    }
 }
 
 fn find_brightness_calc(h: HANDLE) -> Result<u32> {
@@ -606,8 +598,7 @@ fn force_palette_refresh(h: HANDLE) -> Result<()> {
         }
         .with_context(|| "CreateRemoteThread for palette refresh")?;
 
-        let wait_result =
-            unsafe { WaitForSingleObject(thread_handle, REFRESH_THREAD_WAIT_MS) };
+        let wait_result = unsafe { WaitForSingleObject(thread_handle, REFRESH_THREAD_WAIT_MS) };
         let mut exit_code: u32 = 0;
         let _ = unsafe { GetExitCodeThread(thread_handle, &mut exit_code) };
         unsafe { CloseHandle(thread_handle).ok() };

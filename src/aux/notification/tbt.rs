@@ -245,9 +245,9 @@ mod tests {
         // 4x1 圖,skip=4 bytes(= 2 個 pixel), n=2 pixels(白 + 紅)
         let buf = vec![
             0u8, 0, 4, 1, 1, // header w=4 h=1, 1 span
-            4, 2,            // skip=4 bytes(/2 = 2 px), 2 pixels
-            0xFF, 0x7F,      // pixel 0x7FFF = white
-            0x00, 0x7C,      // pixel 0x7C00 = red
+            4, 2, // skip=4 bytes(/2 = 2 px), 2 pixels
+            0xFF, 0x7F, // pixel 0x7FFF = white
+            0x00, 0x7C, // pixel 0x7C00 = red
         ];
         let (rgba, _, _) = decode_tbt(&buf).expect("應成功");
         // canvas[0,2] = white
@@ -265,18 +265,18 @@ mod tests {
         // 結果:row 0 的 0..2 在 canvas[0..2],2..4 在 canvas[2..4]
         let buf = vec![
             0u8, 0, 2, 1, 1, // header w=2 h=1, 1 span
-            0, 4,            // skip 0, 4 pixels
-            0xFF, 0x7F,      // 0x7FFF white
-            0x00, 0x7C,      // 0x7C00 red
-            0xE0, 0x03,      // 0x03E0 green
-            0x1F, 0x00,      // 0x001F blue
+            0, 4, // skip 0, 4 pixels
+            0xFF, 0x7F, // 0x7FFF white
+            0x00, 0x7C, // 0x7C00 red
+            0xE0, 0x03, // 0x03E0 green
+            0x1F, 0x00, // 0x001F blue
         ];
         let (rgba, _, _) = decode_tbt(&buf).expect("應成功");
         // 4 個 pixel 都應出現在 canvas row 0(actual_w 動態擴張)
         assert_eq!(&rgba[0..4], &[255, 255, 255, 255]); // white
-        assert_eq!(&rgba[4..8], &[255, 0, 0, 255]);     // red
-        assert_eq!(&rgba[8..12], &[0, 255, 0, 255]);    // green
-        assert_eq!(&rgba[12..16], &[0, 0, 255, 255]);   // blue
+        assert_eq!(&rgba[4..8], &[255, 0, 0, 255]); // red
+        assert_eq!(&rgba[8..12], &[0, 255, 0, 255]); // green
+        assert_eq!(&rgba[12..16], &[0, 0, 255, 255]); // blue
     }
 
     #[test]

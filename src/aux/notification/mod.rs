@@ -3,18 +3,16 @@
 //! Spec: docs/superpowers/specs/2026-05-11-pickup-notification-design.md
 
 pub mod dispatcher;
-pub mod image_draw_hook;
 pub mod layout;
 pub mod overlay;
 pub mod packet_hook;
 pub mod queue;
 pub mod renderer;
-pub mod renderer_install;
 pub mod sprite_pak;
 pub mod tbt;
 pub mod types;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -23,9 +21,7 @@ use once_cell::sync::Lazy;
 use windows::Win32::Foundation::HANDLE;
 
 /// 計 polling tick 數,在 probe log 印出 — 跟 invocations 比,可判 wrapper 是否真的每 frame 跑。
-static POLLING_TICKS: AtomicU32 = AtomicU32::new(0);
 /// 計 update_list 失敗次數 — handle 死掉時會 spam,聚合成單 log。
-static UPDATE_LIST_FAILS: AtomicU32 = AtomicU32::new(0);
 
 /// 左下道具 toast 開關。launcher 啟動時依 AuxConfig.pickup_toast_enabled 設定。
 /// 為什麼用 atomic 而非 lock:on_packet_recv 是高頻路徑(每個 packet 進來都查),
@@ -34,7 +30,6 @@ static UPDATE_LIST_FAILS: AtomicU32 = AtomicU32::new(0);
 static TOAST_ENABLED: AtomicBool = AtomicBool::new(true);
 /// 金幣 / 經驗值 飄字開關(EXP + Gold 共用一個 flag)。同上理由。
 static FLOAT_ENABLED: AtomicBool = AtomicBool::new(true);
-
 /// 由 launcher 啟動鏈呼叫,把編碼器 AuxConfig 的兩個 flag 設進來。
 /// 任一 toggle 關掉時 packet_hook / overlay 仍 install,只是 on_packet_recv 把
 /// 對應種類的 Notification 在進 queue 前就 drop — 反正 server 還是會送 packet。
@@ -52,8 +47,7 @@ use crate::logger::log_line;
 use queue::NotificationQueue;
 use renderer::DrawCmd;
 
-static QUEUE: Lazy<Mutex<NotificationQueue>> =
-    Lazy::new(|| Mutex::new(NotificationQueue::new()));
+static QUEUE: Lazy<Mutex<NotificationQueue>> = Lazy::new(|| Mutex::new(NotificationQueue::new()));
 
 /// 診斷:每 5s log 一次 hook hit counters(total + packetbox)。
 /// `total_hits` 任何 opcode > 183 都 +1(判 hook 通);
@@ -62,17 +56,10 @@ static LAST_PROBE: Lazy<Mutex<Option<(Instant, u32, u32)>>> = Lazy::new(|| Mutex
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// renderer 安裝後的 cave addr — 若 None 表 install 失敗(packet path 還是會跑,只是看不到)。
-static RENDERER: Lazy<Mutex<Option<renderer_install::RendererHandle>>> =
-    Lazy::new(|| Mutex::new(None));
 
 /// 新架構:image_draw_hook (0x42F450 hook,用 game 自己的 ImageElement_draw 畫 PNG)。
-static IMAGE_DRAW: Lazy<Mutex<Option<image_draw_hook::ImageDrawHandle>>> =
-    Lazy::new(|| Mutex::new(None));
 
 /// 給 renderer_install diag 用(舊架構,已禁用)。
-pub fn renderer_cave_addr() -> Option<u32> {
-    RENDERER.lock().ok().and_then(|s| s.as_ref().map(|h| h.notif_draw_cave))
-}
 
 /// 主啟動鏈呼叫 — 裝 packet hook + renderer。
 /// `game_dir` 用來掃 `Sprite*.idx` 建 PNG 索引(撿物 toast / EXP / Gold icon)。
@@ -101,6 +88,7 @@ pub fn install(h: HANDLE, pid: u32, game_dir: &std::path::Path) -> Result<()> {
 }
 
 /// uninstall 對應 install。
+#[cfg(test)]
 pub fn uninstall(h: HANDLE, pid: u32) -> Result<()> {
     // packet_hook 的 handle 存在 module 內 — uninstall 從那邊讀。
     // 目前 launcher 沒有 hot uninstall 流程,留 stub。
@@ -139,14 +127,8 @@ pub fn on_packet_recv(payload: &[u8]) {
 /// 3) expand 成 DrawCmd 給渲染(Task 3.3b 接 codecave 後才被遊戲讀)
 ///
 /// 一律 panic-safe — `catch_unwind` 包 整段,確保 polling thread 不被打掛。
-pub fn on_polling_tick(
-    h: HANDLE,
-    now: Instant,
-    screen_w: i32,
-    screen_h: i32,
-) -> Vec<DrawCmd> {
+pub fn on_polling_tick(h: HANDLE, now: Instant, screen_w: i32, screen_h: i32) -> Vec<DrawCmd> {
     std::panic::catch_unwind(|| {
-        POLLING_TICKS.fetch_add(1, Ordering::Relaxed);
         // 0) 診斷探針(每 5s)
         probe_total_hits(h, now);
         // 1) 從 cave ring drain 出新 packet
@@ -190,7 +172,6 @@ pub fn on_polling_tick(
         overlay::write_snapshot(overlay::Snapshot {
             toasts: toast_views,
             floats: float_views,
-            captured_at: Some(now),
         });
 
         cmds
@@ -201,57 +182,33 @@ pub fn on_polling_tick(
     })
 }
 
-/// 每 5s 讀 cave counters,log 變化(判 hook 通 + server 送 PACKETBOX)。
 fn probe_total_hits(h: HANDLE, now: Instant) {
-    let Ok(mut state) = LAST_PROBE.lock() else { return };
+    let Ok(mut state) = LAST_PROBE.lock() else {
+        return;
+    };
     let total = packet_hook::read_total_hits(h);
     let pkt = packet_hook::read_packetbox_hits(h);
     match *state {
         None => {
             *state = Some((now, total, pkt));
-            log_line!(
-                "[notification] probe: total={total} packetbox={pkt} (baseline)"
-            );
+            log_line!("[notification] probe: total={total} packetbox={pkt} (baseline)");
         }
         Some((last_at, last_total, last_pkt)) => {
             if now.duration_since(last_at) >= PROBE_INTERVAL {
                 let d_total = total.wrapping_sub(last_total);
                 let d_pkt = pkt.wrapping_sub(last_pkt);
                 log_line!(
-                    "[notification] probe: total={total} Δ={d_total} | packetbox={pkt} Δ={d_pkt} (5s)"
+                    "[notification] probe: total={total} delta={d_total} | packetbox={pkt} delta={d_pkt} (5s)"
                 );
-                let ticks = POLLING_TICKS.load(Ordering::Relaxed);
-                let fails = UPDATE_LIST_FAILS.load(Ordering::Relaxed);
-                let cave = IMAGE_DRAW.lock().ok().and_then(|s| s.as_ref().map(|h| h.cave));
-                if let Some(cave) = cave {
-                    if let Some((inv, stolen, count)) = image_draw_hook::read_diag(h, cave) {
-                        log_line!(
-                            "[notification] render diag: invocations={inv} stolen={stolen} draw_count={count} polling_ticks={ticks} fails={fails}"
-                        );
-                    } else {
-                        log_line!(
-                            "[notification] render diag: read_diag 失敗 polling_ticks={ticks} fails={fails}"
-                        );
-                    }
-                } else {
-                    log_line!(
-                        "[notification] render diag: image_draw_hook 未安裝 polling_ticks={ticks} fails={fails}"
-                    );
-                }
-                // 有新增 hits 才印 opcode ring(避免一直 spam 同樣的 16 個值)
                 if d_total > 0 {
                     let (ring, total_writes) = packet_hook::read_opcode_ring(h);
                     if !ring.is_empty() {
-                        // 取最近 d_total(最多 16)個 — 從 (total_writes-d_total) mod 16 開始
                         let take = d_total.min(16);
                         let start = total_writes.wrapping_sub(d_total) as usize;
                         let recent: Vec<u8> = (0..take as usize)
                             .map(|i| ring[(start + i) & 0x0F])
                             .collect();
-                        log_line!(
-                            "[notification] recent opcodes (>183) seen: {:?}",
-                            recent
-                        );
+                        log_line!("[notification] recent opcodes (>183) seen: {:?}", recent);
                     }
                 }
                 *state = Some((now, total, pkt));
@@ -272,9 +229,7 @@ fn log_packet_diagnostic(payload: &[u8]) {
             if payload.len() >= 3 {
                 let gfxid = u16::from_le_bytes([payload[1], payload[2]]);
                 let name_bytes = payload.len().saturating_sub(3 + 1);
-                log_line!(
-                    "[notification] S_ItemBoard recv: gfxid={gfxid} name_bytes={name_bytes}"
-                );
+                log_line!("[notification] S_ItemBoard recv: gfxid={gfxid} name_bytes={name_bytes}");
             }
         }
         packet_hook::SUB_ID_SHOWDROP => {
@@ -286,13 +241,14 @@ fn log_packet_diagnostic(payload: &[u8]) {
                     1 => "Gold",
                     _ => "UNKNOWN",
                 };
-                log_line!(
-                    "[notification] S_ShowDrop recv: kind={kind_name} amount={amount}"
-                );
+                log_line!("[notification] S_ShowDrop recv: kind={kind_name} amount={amount}");
             }
         }
         _ => {
-            log_line!("[notification] 未知 sub_id {sub_id} payload {} bytes", payload.len());
+            log_line!(
+                "[notification] 未知 sub_id {sub_id} payload {} bytes",
+                payload.len()
+            );
         }
     }
 }

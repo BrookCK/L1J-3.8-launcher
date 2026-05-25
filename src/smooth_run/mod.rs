@@ -14,12 +14,10 @@ pub mod parse;
 pub mod pipeline;
 pub mod types;
 
-pub use helpers::VariantInfo;
-
-pub fn process_variant_lines(text: &str) -> (String, VariantInfo) {
+pub fn process_variant_lines(text: &str) -> String {
     pipeline::process_variant_lines_pipeline(text)
 }
 
-pub fn strip_variant_lines(text: &str) -> (String, VariantInfo) {
+pub fn strip_variant_lines(text: &str) -> String {
     process_variant_lines(text)
 }

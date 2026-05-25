@@ -8,7 +8,6 @@
 
 pub mod i18n;
 pub mod legacy_text;
-pub mod logger;
 pub mod morph_auth;
 pub mod rsa32;
 pub mod server_list;

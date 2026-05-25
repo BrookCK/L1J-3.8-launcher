@@ -32,8 +32,7 @@ const AC80_RESET_LEN: usize = 7;
 const LOCAL_ORIGINAL: [u8; LOCAL_HOOK_LEN] = [0x89, 0x8A, 0x80, 0x03, 0x00, 0x00];
 const REMOTE_ORIGINAL: [u8; REMOTE_HOOK_LEN] = [0x89, 0x81, 0x80, 0x03, 0x00, 0x00];
 const POST_AC80_ORIGINAL: [u8; POST_AC80_LEN] = [0x0F, 0xB6, 0xC0, 0x85, 0xC0];
-const AC80_RESET_ORIGINAL: [u8; AC80_RESET_LEN] =
-    [0xC6, 0x81, 0x6A, 0x03, 0x00, 0x00, 0x00];
+const AC80_RESET_ORIGINAL: [u8; AC80_RESET_LEN] = [0xC6, 0x81, 0x6A, 0x03, 0x00, 0x00, 0x00];
 
 const RETURN_AFTER_POSITION: u32 = 0x0042_BA01;
 const RETURN_AFTER_POST_AC80: u32 = 0x0042_BB00;
@@ -74,8 +73,8 @@ pub fn install(h: HANDLE) -> Result<()> {
     ensure_original(h, POST_AC80_ADDR, &POST_AC80_ORIGINAL, "post_ac80")?;
     ensure_original(h, AC80_RESET_ADDR, &AC80_RESET_ORIGINAL, "ac80_reset")?;
 
-    let cave = memory::alloc_exec(h, CODECAVE_SIZE)
-        .context("[attack_damage_feet] alloc codecave")?;
+    let cave =
+        memory::alloc_exec(h, CODECAVE_SIZE).context("[attack_damage_feet] alloc codecave")?;
 
     let layout = build_shellcode(cave);
     if layout.bytes.len() > CODECAVE_SIZE {
@@ -85,34 +84,25 @@ pub fn install(h: HANDLE) -> Result<()> {
             CODECAVE_SIZE
         );
     }
-    memory::write_code(h, cave, &layout.bytes)
-        .context("[attack_damage_feet] write codecave")?;
+    memory::write_code(h, cave, &layout.bytes).context("[attack_damage_feet] write codecave")?;
 
-    let local_patch = build_jmp_patch::<LOCAL_HOOK_LEN>(
-        LOCAL_HOOK_ADDR,
-        cave + layout.local_offset as u32,
-    );
+    let local_patch =
+        build_jmp_patch::<LOCAL_HOOK_LEN>(LOCAL_HOOK_ADDR, cave + layout.local_offset as u32);
     memory::write_code(h, LOCAL_HOOK_ADDR, &local_patch)
         .context("[attack_damage_feet] patch local hook")?;
 
-    let remote_patch = build_jmp_patch::<REMOTE_HOOK_LEN>(
-        REMOTE_HOOK_ADDR,
-        cave + layout.remote_offset as u32,
-    );
+    let remote_patch =
+        build_jmp_patch::<REMOTE_HOOK_LEN>(REMOTE_HOOK_ADDR, cave + layout.remote_offset as u32);
     memory::write_code(h, REMOTE_HOOK_ADDR, &remote_patch)
         .context("[attack_damage_feet] patch remote hook")?;
 
-    let post_ac80_patch = build_jmp_patch::<POST_AC80_LEN>(
-        POST_AC80_ADDR,
-        cave + layout.post_ac80_offset as u32,
-    );
+    let post_ac80_patch =
+        build_jmp_patch::<POST_AC80_LEN>(POST_AC80_ADDR, cave + layout.post_ac80_offset as u32);
     memory::write_code(h, POST_AC80_ADDR, &post_ac80_patch)
         .context("[attack_damage_feet] patch post_ac80 hook")?;
 
-    let ac80_reset_patch = build_jmp_patch::<AC80_RESET_LEN>(
-        AC80_RESET_ADDR,
-        cave + layout.ac80_reset_offset as u32,
-    );
+    let ac80_reset_patch =
+        build_jmp_patch::<AC80_RESET_LEN>(AC80_RESET_ADDR, cave + layout.ac80_reset_offset as u32);
     memory::write_code(h, AC80_RESET_ADDR, &ac80_reset_patch)
         .context("[attack_damage_feet] patch ac80_reset hook")?;
 
@@ -310,7 +300,15 @@ fn emit_post_ac80(bytes: &mut Vec<u8>, segment_start: u32) {
     let start = bytes.len();
     bytes.extend_from_slice(&[0x8B, 0x55, 0xE0]);
     bytes.extend_from_slice(&[
-        0x66, 0x81, 0xBA, 0x9C, 0x03, 0x00, 0x00, DAMAGE_COLOR_LO, DAMAGE_COLOR_HI,
+        0x66,
+        0x81,
+        0xBA,
+        0x9C,
+        0x03,
+        0x00,
+        0x00,
+        DAMAGE_COLOR_LO,
+        DAMAGE_COLOR_HI,
     ]);
     bytes.extend_from_slice(&[0x75, 0x07]);
     bytes.extend_from_slice(&[0xC6, 0x82, 0x6A, 0x03, 0x00, 0x00, 0x04]);
@@ -325,7 +323,15 @@ fn emit_post_ac80(bytes: &mut Vec<u8>, segment_start: u32) {
 fn emit_ac80_reset(bytes: &mut Vec<u8>, segment_start: u32) {
     let start = bytes.len();
     bytes.extend_from_slice(&[
-        0x66, 0x81, 0xB9, 0x9C, 0x03, 0x00, 0x00, DAMAGE_COLOR_LO, DAMAGE_COLOR_HI,
+        0x66,
+        0x81,
+        0xB9,
+        0x9C,
+        0x03,
+        0x00,
+        0x00,
+        DAMAGE_COLOR_LO,
+        DAMAGE_COLOR_HI,
     ]);
     bytes.extend_from_slice(&[0x74, 0x07]);
     bytes.extend_from_slice(&[0xC6, 0x81, 0x6A, 0x03, 0x00, 0x00, 0x00]);

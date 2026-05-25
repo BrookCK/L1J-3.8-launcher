@@ -21,10 +21,13 @@ pub const FLOAT_GOLD_GFXID: u16 = 1973;
 // ===== Game function & global addresses(Phase 2 RE 結果)=====
 
 /// `surface_data* GetSurfResource(SurfManager*, u16 gfxid)` — thiscall(ECX=this)
+#[cfg(test)]
 pub const GET_SURF_RESOURCE: u32 = 0x00759F20;
 /// PNG SurfManager 全域指標(放進 ECX 給 GetSurfResource)
+#[cfg(test)]
 pub const PNG_SURF_MANAGER: u32 = 0x00C31434;
 /// `void blit_B(surface, src_x, src_y, dst_x, dst_y)` — cdecl 5 args
+#[cfg(test)]
 pub const BLIT_B: u32 = 0x00555CE0;
 
 /// 單筆繪製指令 — 給 shellcode 消費的最小單位(packed 12 bytes)。
@@ -50,7 +53,7 @@ impl DrawCmd {
 /// 把 queue snapshot 展開成 DrawCmd 陣列。
 ///
 /// 輸入:active toasts / floats(來自 NotificationQueue)、螢幕尺寸、現在時間。
-pub fn expand_snapshot(
+pub(super) fn expand_snapshot(
     toasts: &[LiveToast],
     floats: &[LiveFloat],
     screen_w: i32,
@@ -89,6 +92,7 @@ pub fn expand_snapshot(
 ///
 /// Format: `[count: u32 LE][DrawCmd × N]`,DrawCmd = 12 bytes packed
 /// (`gfxid:u16, _pad:u16, x:i32, y:i32`)。
+#[cfg(test)]
 pub fn serialize(cmds: &[DrawCmd]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4 + cmds.len() * 12);
     buf.extend_from_slice(&(cmds.len() as u32).to_le_bytes());
@@ -102,6 +106,7 @@ pub fn serialize(cmds: &[DrawCmd]) -> Vec<u8> {
 }
 
 /// 反序列化(testing/debugging 用)。
+#[cfg(test)]
 pub fn deserialize(buf: &[u8]) -> Option<Vec<DrawCmd>> {
     if buf.len() < 4 {
         return None;
@@ -116,18 +121,8 @@ pub fn deserialize(buf: &[u8]) -> Option<Vec<DrawCmd>> {
         out.push(DrawCmd {
             gfxid: u16::from_le_bytes([buf[off], buf[off + 1]]),
             _pad: u16::from_le_bytes([buf[off + 2], buf[off + 3]]),
-            x: i32::from_le_bytes([
-                buf[off + 4],
-                buf[off + 5],
-                buf[off + 6],
-                buf[off + 7],
-            ]),
-            y: i32::from_le_bytes([
-                buf[off + 8],
-                buf[off + 9],
-                buf[off + 10],
-                buf[off + 11],
-            ]),
+            x: i32::from_le_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]),
+            y: i32::from_le_bytes([buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11]]),
         });
     }
     Some(out)
@@ -165,6 +160,7 @@ pub fn deserialize(buf: &[u8]) -> Option<Vec<DrawCmd>> {
 /// .end:
 /// popfd / popad / ret
 /// ```
+#[cfg(test)]
 pub fn build_draw_loop_shellcode(list_addr: u32) -> Vec<u8> {
     let mut sc = Vec::with_capacity(96);
 
@@ -217,7 +213,7 @@ pub fn build_draw_loop_shellcode(list_addr: u32) -> Vec<u8> {
     sc.extend_from_slice(&[0x6A, 0x00]); // push 0 (src_y)
     sc.extend_from_slice(&[0x6A, 0x00]); // push 0 (src_x)
     sc.push(0x50); // push eax (surface)
-    // mov ecx, BLIT_B
+                   // mov ecx, BLIT_B
     sc.push(0xB9);
     sc.extend_from_slice(&BLIT_B.to_le_bytes());
     // call ecx
@@ -338,13 +334,7 @@ mod tests {
         let now = Instant::now();
         let floats = vec![dummy_float(now, FloatKind::Exp, 0)];
         let cmds_t0 = expand_snapshot(&[], &floats, 800, 600, now);
-        let cmds_later = expand_snapshot(
-            &[],
-            &floats,
-            800,
-            600,
-            now + Duration::from_millis(750),
-        );
+        let cmds_later = expand_snapshot(&[], &floats, 800, 600, now + Duration::from_millis(750));
         assert!(cmds_later[0].y < cmds_t0[0].y);
     }
 
@@ -443,7 +433,11 @@ mod tests {
     fn shellcode_fits_reasonable_size() {
         let sc = build_draw_loop_shellcode(0x10000000);
         assert!(sc.len() < 128, "shellcode {} bytes 過大", sc.len());
-        assert!(sc.len() > 30, "shellcode {} bytes 過小,可能漏 emit", sc.len());
+        assert!(
+            sc.len() > 30,
+            "shellcode {} bytes 過小,可能漏 emit",
+            sc.len()
+        );
     }
 
     /// 驗證 loop back-jump:結尾的 `jmp .loop` rel32 應指回 `test edi, edi`。
@@ -474,12 +468,7 @@ mod tests {
         // jz .end @ offset loop_start + 2(test) = 14
         let jz_at = 14;
         assert_eq!(&sc[jz_at..jz_at + 2], &[0x0F, 0x84]);
-        let rel = i32::from_le_bytes([
-            sc[jz_at + 2],
-            sc[jz_at + 3],
-            sc[jz_at + 4],
-            sc[jz_at + 5],
-        ]);
+        let rel = i32::from_le_bytes([sc[jz_at + 2], sc[jz_at + 3], sc[jz_at + 4], sc[jz_at + 5]]);
         let target = (jz_at + 6) as isize + rel as isize;
         // target 應該是 popfd(0x9D)
         assert_eq!(sc[target as usize], 0x9D);
@@ -501,7 +490,10 @@ mod tests {
         let rel = sc[jz_at + 1] as i8 as isize;
         let target = (jz_at + 2) as isize + rel;
         // target 應落在 add esi, 12(83 C6 0C)
-        assert_eq!(&sc[target as usize..target as usize + 3], &[0x83, 0xC6, 0x0C]);
+        assert_eq!(
+            &sc[target as usize..target as usize + 3],
+            &[0x83, 0xC6, 0x0C]
+        );
     }
 
     /// 驗證 GetSurfResource thiscall pattern:`mov ecx, MGR; mov eax, GET; call eax`
@@ -516,12 +508,7 @@ mod tests {
                 if mgr == PNG_SURF_MANAGER {
                     // 接下來應是 mov eax, GET_SURF(B8 + addr)
                     assert_eq!(sc[i + 5], 0xB8);
-                    let target = u32::from_le_bytes([
-                        sc[i + 6],
-                        sc[i + 7],
-                        sc[i + 8],
-                        sc[i + 9],
-                    ]);
+                    let target = u32::from_le_bytes([sc[i + 6], sc[i + 7], sc[i + 8], sc[i + 9]]);
                     assert_eq!(target, GET_SURF_RESOURCE);
                     // 然後是 call eax (FF D0)
                     assert_eq!(&sc[i + 10..i + 12], &[0xFF, 0xD0]);

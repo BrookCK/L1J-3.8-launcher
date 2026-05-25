@@ -861,7 +861,6 @@ pub fn install_hp_mp_patches(h: HANDLE, _pid: u32) -> Result<()> {
     // Phase 4 的 patch_reads_to_dword 會修改 movsx word [0xC2FDE0/DC] 指令，
     // 而 Phase 5 的 sprintf hook 驗證依賴這些原始位元組。
     // Phase 5 暫時停用（百分比顯示 + x 置中需重新設計）
-    let ui_count = 0;
     log_line!("[HP/MP] Phase 5: 停用（待重新設計）");
 
     // Phase 4: HP/MP display value（血條渲染用）16-bit → 32-bit
@@ -895,6 +894,7 @@ pub fn install_hp_mp_patches(h: HANDLE, _pid: u32) -> Result<()> {
 // 動態找到 sprintf 區域和 x 座標分支。
 // ════════════════════════════════════════════════
 
+#[cfg(test)]
 struct BarUiConfig {
     name: &'static str,
     max_addr: u32,     // .data: maxHP/maxMP
@@ -904,10 +904,13 @@ struct BarUiConfig {
 }
 
 /// widget getter：thiscall, ecx=widget, ret 0, 回傳解密值
+#[cfg(test)]
 const WIDGET_GETTER: u32 = 0x402800;
 /// 血條文字區域視覺寬度（px）
+#[cfg(test)]
 const BAR_TEXT_WIDTH: u32 = 200;
 
+#[cfg(test)]
 fn install_bar_ui_patches(h: HANDLE) -> Result<usize> {
     let mut count = 0;
     // MP 先安裝（較穩定），記錄已佔用的 call_addr
@@ -939,6 +942,7 @@ fn install_bar_ui_patches(h: HANDLE) -> Result<usize> {
 }
 
 /// 單一血條 UI 修補（sprintf 百分比 + x 置中）
+#[cfg(test)]
 fn install_bar_ui(
     h: HANDLE,
     cfg: &BarUiConfig,
@@ -1288,6 +1292,7 @@ fn install_bar_ui(
 }
 
 /// 安裝單一 x 置中 hook
+#[cfg(test)]
 fn install_x_center_hook(
     h: HANDLE,
     name: &str,

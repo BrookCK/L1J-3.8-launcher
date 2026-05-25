@@ -24,6 +24,7 @@ use windows::Win32::System::Registry::{
 use crate::logger::log_line;
 
 const SUBKEY: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+#[cfg(test)]
 const FLAG_VALUE: &str = "~ HIGHDPIAWARE";
 const DISABLE_FULLSCREEN_OPTIMIZATIONS: &str = "DISABLEDXMAXIMIZEDWINDOWEDMODE";
 
@@ -34,6 +35,7 @@ pub fn ensure_disable_fullscreen_optimizations(exe_path: &str) -> Result<()> {
 /// 對 exe_path 設定 HIGHDPIAWARE compatibility flag。
 /// 若 registry 已含此 flag(玩家自己設過或我們之前設過)就跳過。
 /// 失敗回 Err 由呼叫者決定是否致命(這個功能即使失敗,遊戲還是能跑,只是有 ghosting)。
+#[cfg(test)]
 pub fn ensure_high_dpi_aware(exe_path: &str) -> Result<()> {
     let _ = exe_path;
     log_line!("[launch-time] legacy launch mode: skip DPI override");

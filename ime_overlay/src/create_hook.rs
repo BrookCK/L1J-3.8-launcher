@@ -72,14 +72,15 @@ unsafe fn try_disable_tsf_once() {
 
 const CS_OWNDC: u32 = 0x0020;
 const CS_CLASSDC: u32 = 0x0040;
+const WS_EX_COMPOSITED: u32 = 0x0200_0000;
 const TARGET_CLASS: &str = "LUnicodeEdit";
 
 fn patched_lunicodeedit_ex_style(dw_ex_style: u32) -> u32 {
-    dw_ex_style
+    dw_ex_style | WS_EX_COMPOSITED
 }
 
 fn patched_lunicodeedit_class_style(style: u32) -> u32 {
-    style
+    style & !(CS_OWNDC | CS_CLASSDC)
 }
 
 /// 預期的 hot-patch prologue:`mov edi, edi; push ebp; mov ebp, esp`
@@ -526,20 +527,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ddraw_mode_keeps_window_ex_style_unchanged() {
+    fn composited_mode_adds_window_ex_style() {
         let original = 0x0000_0100;
 
         let patched = patched_lunicodeedit_ex_style(original);
 
-        assert_eq!(patched, original);
+        assert_eq!(patched, original | WS_EX_COMPOSITED);
     }
 
     #[test]
-    fn ddraw_mode_keeps_class_dc_styles_unchanged() {
+    fn composited_mode_removes_class_dc_styles() {
         let original = CS_OWNDC | CS_CLASSDC | 0x0008;
 
         let patched = patched_lunicodeedit_class_style(original);
 
-        assert_eq!(patched, original);
+        assert_eq!(patched, 0x0008);
     }
 }

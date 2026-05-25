@@ -36,18 +36,18 @@ struct IdxEntry {
 
 static INDEX: Lazy<Mutex<Option<HashMap<String, IdxEntry>>>> = Lazy::new(|| Mutex::new(None));
 
-const HEADER_SIZE: usize = 4;     // int32 LE record_count
+const HEADER_SIZE: usize = 4; // int32 LE record_count
 const ENTRY_SIZE: usize = 28;
 const FILENAME_LEN: usize = 20;
 const FILENAME_OFFSET: usize = 4; // entry +0x04 起 20 bytes 是 filename
-const SIZE_OFFSET: usize = 24;    // entry +0x18 起 4 bytes 是 size
+const SIZE_OFFSET: usize = 24; // entry +0x18 起 4 bytes 是 size
 
 /// 初始化:掃 `game_dir` 內所有 `Sprite*.idx`,建索引。 idempotent — 重複呼叫只重建一次。
 pub fn init(game_dir: &Path) -> Result<()> {
     let mut map: HashMap<String, IdxEntry> = HashMap::new();
 
-    let entries = std::fs::read_dir(game_dir)
-        .with_context(|| format!("讀 {} 失敗", game_dir.display()))?;
+    let entries =
+        std::fs::read_dir(game_dir).with_context(|| format!("讀 {} 失敗", game_dir.display()))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -82,7 +82,10 @@ pub fn init(game_dir: &Path) -> Result<()> {
             let base = i * ENTRY_SIZE;
             let offset = u32::from_le_bytes(body[base..base + 4].try_into().unwrap());
             let name_bytes = &body[base + FILENAME_OFFSET..base + FILENAME_OFFSET + FILENAME_LEN];
-            let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(FILENAME_LEN);
+            let nul = name_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(FILENAME_LEN);
             let name = match std::str::from_utf8(&name_bytes[..nul]) {
                 Ok(s) => s.to_string(),
                 Err(_) => continue,
@@ -106,7 +109,11 @@ pub fn init(game_dir: &Path) -> Result<()> {
 
     let count = map.len();
     *INDEX.lock().unwrap() = Some(map);
-    log_line!("[sprite_pak] indexed {} entries from {}", count, game_dir.display());
+    log_line!(
+        "[sprite_pak] indexed {} entries from {}",
+        count,
+        game_dir.display()
+    );
     Ok(())
 }
 
@@ -161,9 +168,7 @@ fn load_png_internal(filename: &str, auto_key: bool) -> Option<DecodedPng> {
     let mut f = match File::open(&pak_path) {
         Ok(f) => f,
         Err(e) => {
-            log_line!(
-                "[sprite_pak] load_png '{filename}': open {pak_path:?} 失敗 {e}"
-            );
+            log_line!("[sprite_pak] load_png '{filename}': open {pak_path:?} 失敗 {e}");
             return None;
         }
     };
@@ -189,7 +194,10 @@ pub fn load_png_paired(black_name: &str, white_name: &str) -> Option<DecodedPng>
     if black.width != white.width || black.height != white.height {
         log_line!(
             "[sprite_pak] paired size 不一致 '{black_name}' {}x{} vs '{white_name}' {}x{}",
-            black.width, black.height, white.width, white.height
+            black.width,
+            black.height,
+            white.width,
+            white.height
         );
         return None;
     }

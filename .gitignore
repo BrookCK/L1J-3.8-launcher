@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+**/target/
 **/*.rs.bk
 *.pdb
 
@@ -14,6 +15,7 @@ launcher.log
 lineage.cfg
 
 # IDE
+.serena/
 .vscode/
 .idea/
 *.iml

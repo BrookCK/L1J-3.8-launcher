@@ -19,9 +19,10 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
-    DeleteDC, DeleteObject, FillRect, GetDC, GetSysColorBrush, InvalidateRect, ReleaseDC,
-    ScreenToClient, SelectObject, SetBkColor, SetTextColor, BeginPaint, EndPaint, COLOR_WINDOW,
-    HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, GetSysColorBrush, InvalidateRect,
+    ReleaseDC, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, BeginPaint,
+    EndPaint, COLOR_WINDOW, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, HBRUSH, HDC,
+    HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::Ime::{
@@ -31,13 +32,13 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, EnumChildWindows, EnumThreadWindows, EnumWindows,
     GetAncestor, GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, KillTimer, SendMessageW, SetTimer,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, SendMessageW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, EVENT_OBJECT_CREATE, EVENT_OBJECT_FOCUS,
     GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WM_CHAR, WM_CTLCOLOREDIT,
     WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
     WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYUP,
-    WM_KILLFOCUS, WM_NCPAINT, WM_PAINT, WM_PRINTCLIENT, WM_SETFOCUS, WM_SETTEXT, WM_TIMER,
+    WM_KILLFOCUS, WM_NCPAINT, WM_PAINT, WM_PRINTCLIENT, WM_SETFOCUS, WM_SETREDRAW, WM_SETTEXT, WM_TIMER,
 };
 
 const PRF_CLIENT: usize = 0x0000_0004;
@@ -59,19 +60,19 @@ const IMN_OPENCANDIDATE: usize = 0x05;
 
 const GCS_COMPSTR: u32 = 0x0008;
 
-/// Phase 4 repaint timer — 每 33ms 從 DDraw capture 灌一次背景到 LUnicodeEdit
+/// Disabled DDraw repaint experiment: timer that pushed captured pixels into LUnicodeEdit.
 /// 的 redirection bitmap。30Hz 對打字顯示足夠平滑,且開銷遠低於 60Hz。
 const REPAINT_TIMER_ID: usize = 0xAB_7C_5E_01;
 const REPAINT_TIMER_MS: u32 = 33;
 const USE_DDRAW_REPAINT_TIMER: bool = false;
-const USE_DDRAW_PAINT_OVERRIDE: bool = true;
-const USE_DDRAW_ERASE_BACKGROUND: bool = true;
-const USE_DDRAW_EVENT_REPAINT: bool = true;
+const USE_DDRAW_PAINT_OVERRIDE: bool = false;
+const USE_DDRAW_ERASE_BACKGROUND: bool = false;
+const USE_DDRAW_EVENT_REPAINT: bool = false;
+const USE_PLAIN_EDIT_BACKGROUND: bool = false;
 const WS_EX_COMPOSITED_STYLE: u32 = 0x0200_0000;
 
 fn needs_post_create_composited(ex_style: u32) -> bool {
-    let _ = ex_style;
-    false
+    ex_style & WS_EX_COMPOSITED_STYLE == 0
 }
 
 /// 已 subclass 的視窗:hwnd → 原 wndproc(32-bit:i32)
@@ -81,10 +82,13 @@ static SUBCLASSED: Mutex<Option<HashMap<isize, i32>>> = Mutex::new(None);
 static GAME_WNDPROC: Mutex<i32> = Mutex::new(0);
 static DIAG_SEEN: Mutex<Option<HashMap<isize, u64>>> = Mutex::new(None);
 static EDIT_BG_BRUSH: Mutex<isize> = Mutex::new(0);
-/// Phase 4:已套 repaint timer 的 hwnd 集合,值是 SetTimer 回傳 id(0 = 失敗)
+/// Disabled DDraw repaint experiment: hwnds with a repaint timer.
 static TIMER_ARMED: Mutex<Option<HashMap<isize, u32>>> = Mutex::new(None);
-/// Phase 4:WM_TIMER 第一次/前幾次 fire 計數(per hwnd) — 用來確認 timer 真有跑
+/// Disabled DDraw repaint experiment: early WM_TIMER diagnostics.
 static TIMER_FIRE_COUNT: Mutex<Option<HashMap<isize, u32>>> = Mutex::new(None);
+
+static EVENT_REPAINT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 const EDIT_BG_COLOR: u32 = 0x00FFFFFF;
 const EDIT_TEXT_COLOR: u32 = 0x00000000;
@@ -317,7 +321,7 @@ unsafe fn subclass_window(hwnd: HWND) {
     // SetTimer 不在這裡叫 — 此處是 worker thread 的 EVENT_OBJECT_FOCUS callback,
     // hwnd 屬於 UI thread。改在 subclass_wndproc 第一次 fire 時 lazy-arm,
     // 那一定是 hwnd 自己的 owning thread。
-    // apply_double_buffer_post(hwnd);
+    // WS_EX_COMPOSITED is the active path. The DDraw repaint experiment remains disabled.
     let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
     if needs_post_create_composited(ex_style) {
         apply_double_buffer_post(hwnd);
@@ -375,6 +379,58 @@ unsafe fn blit_capture_to_window_logged(hwnd: HWND) -> bool {
     let ok = paint_edit_over_capture(hwnd, hdc);
     ReleaseDC(Some(hwnd), hdc);
     ok
+}
+
+unsafe fn paint_plain_edit_to_window(hwnd: HWND) -> bool {
+    let hdc = GetDC(Some(hwnd));
+    if hdc.0.is_null() {
+        return false;
+    }
+    let ok = paint_plain_edit_client(hwnd, hdc);
+    ReleaseDC(Some(hwnd), hdc);
+    ok
+}
+
+unsafe fn paint_plain_edit_client(hwnd: HWND, hdc: HDC) -> bool {
+    if hdc.0.is_null() {
+        return false;
+    }
+
+    let mut rc = RECT::default();
+    if GetClientRect(hwnd, &mut rc).is_err() {
+        return false;
+    }
+    if rc.right <= rc.left || rc.bottom <= rc.top {
+        return false;
+    }
+
+    let _ = FillRect(hdc, &rc, edit_bg_brush());
+    SetBkColor(hdc, COLORREF(EDIT_BG_COLOR));
+    SetTextColor(hdc, COLORREF(EDIT_TEXT_COLOR));
+    SetBkMode(hdc, TRANSPARENT);
+
+    let len = GetWindowTextLengthW(hwnd);
+    if len > 0 {
+        let mut buf = vec![0u16; len as usize + 1];
+        let read = GetWindowTextW(hwnd, &mut buf);
+        if read > 0 {
+            let mut text = buf[..read as usize].to_vec();
+            let mut text_rc = RECT {
+                left: rc.left + 2,
+                top: rc.top,
+                right: rc.right - 2,
+                bottom: rc.bottom,
+            };
+            let _ = DrawTextW(
+                hdc,
+                &mut text,
+                &mut text_rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
+    }
+
+    true
 }
 
 unsafe fn paint_edit_over_capture(hwnd: HWND, target_hdc: HDC) -> bool {
@@ -549,9 +605,19 @@ extern "system" fn subclass_wndproc(
             crate::tsf_sink::set_last_focus_edit(hwnd);
         }
 
+        if USE_PLAIN_EDIT_BACKGROUND && should_block_original_paint(msg) {
+            let _ = paint_plain_edit_to_window(hwnd);
+            return LRESULT(0);
+        }
+
         if USE_DDRAW_ERASE_BACKGROUND && msg == WM_ERASEBKGND {
             let hdc = HDC(wparam.0 as *mut _);
-            if paint_with_ddraw_capture(hwnd, hdc) {
+            let painted = if USE_PLAIN_EDIT_BACKGROUND {
+                paint_plain_edit_client(hwnd, hdc)
+            } else {
+                paint_with_ddraw_capture(hwnd, hdc)
+            };
+            if painted {
                 return LRESULT(1);
             }
         }
@@ -584,6 +650,15 @@ extern "system" fn subclass_wndproc(
 
         // 視窗 destroy 時關 timer(避免 timer fire 到已釋放的 hwnd)
         if USE_DDRAW_PAINT_OVERRIDE && msg == WM_PAINT {
+            if USE_PLAIN_EDIT_BACKGROUND {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                if !hdc.0.is_null() {
+                    let _ = paint_plain_edit_client(hwnd, hdc);
+                }
+                let _ = EndPaint(hwnd, &ps);
+                return LRESULT(0);
+            }
             return paint_double_buffered_over_capture(hwnd);
         }
 
@@ -689,19 +764,43 @@ extern "system" fn subclass_wndproc(
         // 所有 IME notify 都不傳(實驗 A 擴大)
         let key = hwnd.0 as isize;
         let orig: i32 = with_map(|m| m.get(&key).copied()).unwrap_or(0);
+        let suppress_redraw = USE_DDRAW_EVENT_REPAINT && should_suppress_original_redraw(msg);
         let result = if block_original_for_ime_notify {
             LRESULT(0)
         } else if orig != 0 {
             let proc_ptr: extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
                 std::mem::transmute(orig as usize);
-            CallWindowProcW(Some(proc_ptr), hwnd, msg, wparam, lparam)
+            if suppress_redraw {
+                let _ = SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), Some(LPARAM(0)));
+            }
+            let result = CallWindowProcW(Some(proc_ptr), hwnd, msg, wparam, lparam);
+            if suppress_redraw {
+                let _ = SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(1)), Some(LPARAM(0)));
+            }
+            result
         } else {
             LRESULT(0)
         };
 
         if should_refresh_edit(msg) {
             if USE_DDRAW_EVENT_REPAINT {
-                let painted = blit_capture_to_window_logged(hwnd);
+                let painted = if USE_PLAIN_EDIT_BACKGROUND {
+                    paint_plain_edit_to_window(hwnd)
+                } else {
+                    blit_capture_to_window_logged(hwnd)
+                };
+                let n = EVENT_REPAINT_COUNT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if n <= 20 || n % 100 == 0 {
+                    dbg_log!(
+                        "[ime] event repaint #{n} hwnd=0x{:X} msg=0x{:X} suppress_redraw={} painted={}",
+                        hwnd.0 as usize,
+                        msg,
+                        suppress_redraw,
+                        painted
+                    );
+                }
                 if !painted {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
@@ -1042,7 +1141,7 @@ unsafe fn edit_bg_brush() -> HBRUSH {
 fn should_refresh_edit(msg: u32) -> bool {
     matches!(
         msg,
-        WM_CHAR | WM_KEYUP | WM_SETTEXT | WM_SETFOCUS | WM_IME_COMPOSITION
+        WM_CHAR | WM_KEYUP | WM_SETTEXT | WM_SETFOCUS | WM_NCPAINT | WM_IME_COMPOSITION
     )
 }
 
@@ -1051,31 +1150,30 @@ fn should_refresh_edit(msg: u32) -> bool {
 // 攔截未來新建的 LUnicodeEdit(玩家點不同對話框時遊戲會建新 instance)。
 // 用 WinEvent OBJECT_CREATE 比 inline hook user32!CreateWindowExW 簡單,不會踩 race。
 
+fn should_suppress_original_redraw(msg: u32) -> bool {
+    matches!(msg, WM_CHAR | WM_SETTEXT | WM_IME_COMPOSITION)
+}
+
+fn should_block_original_paint(msg: u32) -> bool {
+    matches!(msg, WM_NCPAINT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn edit_print_flags_keep_ddraw_background() {
-        assert_ne!(EDIT_PRINT_FLAGS & PRF_CLIENT, 0);
-        assert_eq!(EDIT_PRINT_FLAGS & PRF_ERASEBKGND, 0);
-    }
-
-    #[test]
-    fn ddraw_mode_uses_paint_and_erase_without_timer() {
+    fn composited_mode_disables_ddraw_repaint_paths() {
         assert!(!USE_DDRAW_REPAINT_TIMER);
-        assert!(USE_DDRAW_PAINT_OVERRIDE);
-        assert!(USE_DDRAW_ERASE_BACKGROUND);
+        assert!(!USE_DDRAW_PAINT_OVERRIDE);
+        assert!(!USE_DDRAW_ERASE_BACKGROUND);
+        assert!(!USE_DDRAW_EVENT_REPAINT);
+        assert!(!USE_PLAIN_EDIT_BACKGROUND);
     }
 
     #[test]
-    fn ddraw_mode_repaints_input_events_immediately() {
-        assert!(USE_DDRAW_EVENT_REPAINT);
-    }
-
-    #[test]
-    fn ddraw_mode_never_applies_post_create_composited() {
-        assert!(!needs_post_create_composited(0));
+    fn composited_mode_applies_post_create_fallback_when_missing() {
+        assert!(needs_post_create_composited(0));
         assert!(!needs_post_create_composited(WS_EX_COMPOSITED_STYLE));
     }
 }

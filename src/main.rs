@@ -4,8 +4,10 @@
 //! 時間保護、IMG 上限與 FileHook 由 stage2 在遊戲啟動後處理。
 
 #![windows_subsystem = "windows"]
+#![cfg_attr(test, allow(unused))]
 
 mod aux;
+mod bot;
 mod config;
 mod dpi_override;
 mod equip_ui;
@@ -17,16 +19,18 @@ mod i18n;
 mod ime_inject;
 mod img_hover;
 mod inject;
-mod legacy_text;
+pub use launcher::legacy_text;
 mod lineage_cfg;
 mod logger;
 mod login;
 mod memory;
+mod minimap;
 mod packet_proxy;
 mod patch;
 mod process;
 mod smooth_run;
 mod smooth_run_hook;
+mod sprite_catalog;
 
 use crate::logger::log_line;
 use anyhow::{bail, Context, Result};
@@ -356,6 +360,25 @@ fn smooth_run_hook_disabled_by_env() -> bool {
         || marker_file_present("disable_smooth_run_hook.flag")
 }
 
+fn file_hook_disabled_by_env() -> bool {
+    env_truthy("LOGIN38_DISABLE_FILE_HOOK") || marker_file_present("disable_file_hook.flag")
+}
+
+fn server_packet_hook_enabled_by_env() -> bool {
+    env_truthy("LOGIN38_ENABLE_SERVER_PACKET_HOOK")
+        || marker_file_present("enable_server_packet_hook.flag")
+}
+
+fn send_packet_spy_enabled_by_env() -> bool {
+    env_truthy("LOGIN38_ENABLE_SEND_PACKET_SPY")
+        || marker_file_present("enable_send_packet_spy.flag")
+}
+
+fn force_simplified_text_locale_enabled_by_env() -> bool {
+    env_truthy("LOGIN38_FORCE_SIMPLIFIED_TEXT_LOCALE")
+        || marker_file_present("force_simplified_text_locale.flag")
+}
+
 fn img_hover_disabled_by_env() -> bool {
     env_truthy("LOGIN38_DISABLE_IMG_HOVER") || marker_file_present("disable_img_hover.flag")
 }
@@ -528,14 +551,12 @@ fn run_stage2_cli(args: &[String]) -> Result<()> {
     let mut no_connect = false;
     let mut inject_path: Option<String> = None;
     let mut delay_ms = 0_u64;
-    let mut windowed = true;
 
     let mut i = 6;
     while i < args.len() {
         match args[i].as_str() {
             "--no-connect" => no_connect = true,
-            "--windowed" => windowed = true,
-            "--fullscreen" => windowed = false,
+            "--windowed" | "--fullscreen" => {}
             "--delay-ms" => {
                 i += 1;
                 if i >= args.len() {
@@ -567,7 +588,12 @@ fn run_stage2_cli(args: &[String]) -> Result<()> {
     }
 
     log_line!("[stage2] attach pid={pid} target={ip}:{port} game_dir={game_dir}");
+    minimap::set_game_dir(&game_dir);
     let h_process = process::open_game_process(pid)?;
+    if force_simplified_text_locale_enabled_by_env() {
+        patch::spawn_force_simplified_text_locale_worker(h_process);
+    }
+    patch::spawn_simplified_status_tooltip_encoding_worker(h_process);
 
     let connect_hook_installed =
         install_stage2_connect_hook(h_process, pid, &ip, port, no_connect, "pre-patch")?;
@@ -595,7 +621,37 @@ fn run_stage2_cli(args: &[String]) -> Result<()> {
     )?;
 
     let _ = wait_for_visible_window(pid, "post-start feature patch");
+
+    // 多開保護:鎖定自家 game 的 HWND,後續 input_sim / window_guard / overlay / lhx_window 都從 cache 拿,
+    // 不再 FindWindowW(NULL, title) 拿到別人視窗(2026-05-17 修)。 失敗只 warn 不中斷,後續 callers fallback FindWindowW
+    match aux::game_window::init_game_hwnd(pid) {
+        Ok(hwnd) => log_line!(
+            "[stage2] game HWND locked pid={pid} hwnd=0x{:X}",
+            hwnd.0 as usize
+        ),
+        Err(e) => log_line!("[stage2] WARN init_game_hwnd 失敗(多開可能受影響): {e:#}"),
+    }
+
+    let bot_enabled = load_aux_config().internal_bot_enabled;
+    if bot_enabled {
+        if let Err(e) = bot::install(h_process, pid) {
+            log_line!("[stage2] bot install failed: {e:#}");
+        }
+    }
+
     let kept_alive_for_aux = run_lhx_aux_until_game_exit(h_process, pid)?;
+
+    // bot 啟用但 LHX 沒啟用時 run_lhx 立即回傳,需自己等遊戲結束才能 shutdown bot
+    if bot_enabled && !kept_alive_for_aux {
+        log_line!("[stage2] bot enabled (no LHX),waiting for game exit");
+        unsafe {
+            WaitForSingleObject(h_process, INFINITE);
+        }
+    }
+
+    if bot_enabled {
+        bot::shutdown();
+    }
 
     unsafe {
         let _ = CloseHandle(h_process);
@@ -648,6 +704,11 @@ fn spawn_early_file_hook_worker(
     pid: u32,
     inject_path: Option<&str>,
 ) -> Result<Option<EarlyFileHookWorker>> {
+    if file_hook_disabled_by_env() {
+        log_line!("[stage2] FileHook disabled by marker/env; early FileHook skipped");
+        return Ok(None);
+    }
+
     let Some(path) = inject_path else {
         log_line!("[stage2] no inject file path; early FileHook skipped");
         return Ok(None);
@@ -684,10 +745,7 @@ fn run_stage2_feature_patches(
     game_dir: &str,
 ) -> Result<()> {
     let aux_cfg = load_aux_config();
-    crate::aux::notification::set_enabled(
-        aux_cfg.pickup_toast_enabled,
-        aux_cfg.exp_drift_enabled,
-    );
+    crate::aux::notification::set_enabled(aux_cfg.pickup_toast_enabled, aux_cfg.exp_drift_enabled);
 
     if connect_hook_installed {
         log_line!("[stage2] early connect hook already installed before time patch");
@@ -751,6 +809,13 @@ fn run_stage2_feature_patches(
         log_line!("[stage2] dynamic dialog disabled by config");
     }
 
+    if aux_cfg.dynamic_dialog_enabled {
+        match aux::dynamic_dialog_hook::install(h_process, pid) {
+            Ok(_) => log_line!("[stage2] dynamic dialog hook installed"),
+            Err(e) => log_line!("[stage2] dynamic dialog hook failed: {e:#}"),
+        }
+    }
+
     if aux_cfg.equip_ui_enabled && !equip_ui_disabled_by_env() {
         equip_ui::install_equip_ui_patches(h_process, pid)?;
         log_line!("[stage2] equip UI patches installed");
@@ -792,12 +857,20 @@ fn run_stage2_feature_patches(
             log_line!("[stage2] poison hook failed: {e}");
         }
     }
-    let _ = crate::aux::notification::install(
-        h_process,
-        pid,
-        std::path::Path::new(&game_dir),
-    )
-    .map_err(|e| crate::logger::log_line!("[notification] install skipped: {e:#}"));
+    let _ = crate::aux::notification::install(h_process, pid, std::path::Path::new(&game_dir))
+        .map_err(|e| crate::logger::log_line!("[notification] install skipped: {e:#}"));
+    if should_install_server_packet_hook(&aux_cfg) {
+        let _ = crate::aux::server_packet_hook::install(h_process, pid)
+            .map_err(|e| crate::logger::log_line!("[server-packet-hook] install skipped: {e:#}"));
+    } else {
+        log_line!("[server-packet-hook] skipped; opt-in diagnostic hook disabled");
+    }
+    if send_packet_spy_enabled_by_env() {
+        let _ = crate::aux::use_item_spy::install_send_packet_spy(h_process)
+            .map_err(|e| crate::logger::log_line!("[spy] SendPacketData install skipped: {e:#}"));
+    } else {
+        log_line!("[spy] SendPacketData skipped; opt-in diagnostic hook disabled");
+    }
     if aux_cfg.move_packet_no_encrypt {
         spawn_delayed_move_packet_no_encrypt_patch(h_process);
     }
@@ -808,6 +881,10 @@ fn run_stage2_feature_patches(
 
 fn should_start_lhx_aux(aux_cfg: &launcher::server_list::AuxConfig) -> bool {
     aux_cfg.lhx_aux_enabled
+}
+
+fn should_install_server_packet_hook(aux_cfg: &launcher::server_list::AuxConfig) -> bool {
+    aux_cfg.internal_bot_enabled || server_packet_hook_enabled_by_env()
 }
 
 fn player_state_ready_for_lhx(state: &aux::player_state::PlayerState) -> bool {
@@ -1494,6 +1571,16 @@ mod tests {
 
         aux.lhx_aux_enabled = true;
         assert!(should_start_lhx_aux(&aux));
+    }
+
+    #[test]
+    fn server_packet_hook_is_tied_to_internal_bot_switch() {
+        let mut aux = launcher::server_list::AuxConfig::default();
+        aux.internal_bot_enabled = false;
+        assert!(!should_install_server_packet_hook(&aux));
+
+        aux.internal_bot_enabled = true;
+        assert!(should_install_server_packet_hook(&aux));
     }
 
     #[test]

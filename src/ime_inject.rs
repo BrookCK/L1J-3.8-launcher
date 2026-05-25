@@ -55,13 +55,13 @@ pub fn ensure_cached() -> Result<PathBuf> {
 /// 預載 IME overlay DLL 進目標 process(全程式碼路徑 LoadLibraryW)。
 pub fn inject_ime_dll(h: HANDLE, cache_dir: &Path) -> Result<()> {
     let load_lib = load_library_w_addr()?;
-    inject_one(h, load_lib, &cache_dir.join("lineage_ime.dll"), "ime-overlay")?;
+    inject_one(
+        h,
+        load_lib,
+        &cache_dir.join("lineage_ime.dll"),
+        "ime-overlay",
+    )?;
     Ok(())
-}
-
-pub fn inject_dll(h: HANDLE, dll_path: &Path, tag: &str) -> Result<()> {
-    let load_lib = load_library_w_addr()?;
-    inject_one(h, load_lib, dll_path, tag)
 }
 
 fn deploy(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {

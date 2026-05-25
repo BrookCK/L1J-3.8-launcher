@@ -28,6 +28,25 @@ pub fn read_u32(h: HANDLE, addr: u32) -> Result<u32> {
     Ok(u32::from_le_bytes(buf))
 }
 
+/// 讀取 2 bytes 無號整數(little-endian)
+pub fn read_u16(h: HANDLE, addr: u32) -> Result<u16> {
+    let mut buf = [0u8; 2];
+    let mut read = 0usize;
+    unsafe {
+        ReadProcessMemory(
+            h,
+            addr as *const _,
+            buf.as_mut_ptr().cast(),
+            2,
+            Some(&mut read),
+        )?;
+    }
+    if read != 2 {
+        bail!("讀取 0x{addr:08X} 失敗：只讀到 {read} bytes");
+    }
+    Ok(u16::from_le_bytes(buf))
+}
+
 /// 讀取 N bytes
 pub fn read_bytes(h: HANDLE, addr: u32, size: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; size];

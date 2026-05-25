@@ -379,7 +379,10 @@ fn dispatch_use_on_self(ctx: &DispatchCtx<'_>, bi: &BuffItem) -> DispatchOutcome
     let self_char_id = match crate::memory::read_u32(h, 0x00ABF4B4) {
         Ok(v) => v,
         Err(e) => {
-            log_line!("[dispatch] item={:?}/IME 讀自己 char_id 失敗: {e:#}", bi.name);
+            log_line!(
+                "[dispatch] item={:?}/IME 讀自己 char_id 失敗: {e:#}",
+                bi.name
+            );
             return DispatchOutcome::Skipped("self_char_id_unavailable");
         }
     };

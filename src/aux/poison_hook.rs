@@ -31,7 +31,7 @@
 use anyhow::Result;
 use windows::Win32::Foundation::HANDLE;
 
-use crate::aux::address::{G_HASTE_BUFF_TABLE, G_PLAYER_PTR};
+use crate::aux::address::G_PLAYER_PTR;
 use crate::logger::log_line;
 use crate::memory::{read_bytes, read_u32};
 
@@ -47,7 +47,6 @@ const KIND_DAMAGE: u8 = 1;
 ///
 /// 2026-05-01 GM `.poison silence` 觸發 + snapshot diff 驗證 byte_table[452] 由 0→1。
 /// 卡司特毒是中文俗稱(來自卡司特族怪物),正式效果就是「不能施法」沉默。
-const STATE_SILENCE: u32 = 452;
 
 /// install stub — 不再做事。保留簽名讓 main.rs 不用改。
 ///
@@ -91,16 +90,4 @@ pub fn is_damage_poisoned(h: HANDLE) -> bool {
     }
     // 額外比對 +0x25 byte 編碼的中毒種類,過濾誤報。byte=1 才是傷害毒。
     matches!(read_player_byte(h, PLAYER_POISON_KIND_OFFSET), Some(k) if k == KIND_DAMAGE)
-}
-
-/// 是否中麻痺毒。3.8 對映 bit / byte 待真實怪物觸發後驗證,目前固定 false。
-#[allow(dead_code)]
-pub fn is_paralyze_poisoned(_h: HANDLE) -> bool {
-    false
-}
-
-/// 是否中卡司特毒。3.8 對映 bit / byte 待真實怪物觸發後驗證,目前固定 false。
-#[allow(dead_code)]
-pub fn is_kasuto_poisoned(_h: HANDLE) -> bool {
-    false
 }

@@ -35,7 +35,6 @@ use crate::aux::address::SEND_PACKET_DATA;
 use crate::logger::log_line;
 use crate::memory::{alloc_exec, read_bytes, read_u32, write_code};
 
-const HOOK_LEN: usize = 5;
 /// 原始 prologue 要相對搬移的最少 byte 數(SendPacketData @ 0x580E50 是 8 bytes:
 /// `55 8B EC B8 0C 14 00 00` = push ebp + mov ebp,esp + mov eax,0x140C)。
 /// 5-byte JMP 之後補 3 NOP(0x90)填空,讓 fall-through 不會踩中段指令。
@@ -49,11 +48,7 @@ const ENTRY_MAGIC: u32 = 0xFEED_FACE;
 const CAVE_SIZE: usize = 0x4000;
 
 /// 已安裝的 spy hook 控制
-pub struct SpyHandle {
-    pub cave: u32,
-    pub orig_bytes: [u8; RELOC_LEN],
-    pub poll_cancel: Arc<AtomicBool>,
-}
+pub struct SpyHandle;
 
 /// 檢查 N bytes 內是否含相對跳轉 — 這些抄到 codecave 執行會跳到錯誤位址。
 ///
@@ -138,11 +133,7 @@ pub fn install_send_packet_spy(h: HANDLE) -> Result<SpyHandle> {
         spy_poll_loop(h, cave, cancel_thr);
     });
 
-    Ok(SpyHandle {
-        cave,
-        orig_bytes,
-        poll_cancel: cancel,
-    })
+    Ok(SpyHandle)
 }
 
 /// 組合 spy shellcode(完整 inline hook stub)
@@ -278,15 +269,6 @@ fn build_spy_shellcode(cave: u32, orig: &[u8; RELOC_LEN]) -> Vec<u8> {
     sc.extend_from_slice(&rel.to_le_bytes());
 
     sc
-}
-
-/// 拆 spy hook(還原 SendPacketData 原 8 bytes + 通知 polling thread 結束)。
-#[allow(dead_code)]
-pub fn uninstall_send_packet_spy(h: HANDLE, handle: &SpyHandle) -> Result<()> {
-    handle.poll_cancel.store(true, Ordering::Relaxed);
-    write_code(h, SEND_PACKET_DATA, &handle.orig_bytes)?;
-    log_line!("[spy] SendPacketData hook 已拆除(還原 {} bytes)", RELOC_LEN);
-    Ok(())
 }
 
 /// Polling thread 主迴圈 — 每 200ms 讀 log_idx 與新增的 entry,印到 log。

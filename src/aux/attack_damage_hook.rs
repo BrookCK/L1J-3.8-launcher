@@ -63,6 +63,7 @@ const CODECAVE_SIZE: usize = 0x8000;
 const TEXT_BUFFER_SIZE: usize = 96;
 const ACCUMULATOR_TIMEOUT_MS: u32 = 8_000;
 
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy)]
 struct LastHitState {
     target_id: u32,
@@ -70,6 +71,7 @@ struct LastHitState {
     tick: u32,
 }
 
+#[cfg(test)]
 fn update_total_state(state: &mut LastHitState, target_id: u32, damage: u32, now: u32) -> u32 {
     let elapsed = now.wrapping_sub(state.tick);
     if state.target_id == target_id && elapsed <= ACCUMULATOR_TIMEOUT_MS {
@@ -131,7 +133,6 @@ pub fn install(h: HANDLE) -> Result<()> {
     if guard.is_some() {
         return Ok(());
     }
-
     ensure_hook_original(h, ATTACK_HOOK_ADDR, &ATTACK_ORIGINAL_BYTES, "attack")?;
     ensure_hook_original(
         h,
@@ -189,7 +190,6 @@ pub fn uninstall(h: HANDLE) -> Result<()> {
     let Some(state) = guard.take() else {
         return Ok(());
     };
-
     restore_hook(
         h,
         MAGIC_AOE_EXT_DAMAGE_HOOK_ADDR,
@@ -300,9 +300,9 @@ struct AbsFixup {
 struct Shellcode {
     bytes: Vec<u8>,
     attack_entry_offset: usize,
-    #[allow(dead_code)]
+    #[cfg(test)]
     aoe_entry_offset: usize,
-    #[allow(dead_code)]
+    #[cfg(test)]
     magic_aoe_entry_offset: usize,
     magic_aoe_ext_damage_entry_offset: usize,
 }
@@ -371,10 +371,16 @@ fn build_shellcode(cave: u32, gettickcount_addr: u32) -> Shellcode {
     let attack_entry_offset = sc.len();
     let attack_branch = emit_attack_entry(&mut sc, &mut abs_fixups, &mut append_calls);
 
+    #[cfg(test)]
     let aoe_entry_offset = sc.len();
+    #[cfg(not(test))]
+    let _aoe_entry_offset = sc.len();
     let aoe_branch = emit_aoe_entry(&mut sc, &mut abs_fixups, &mut append_calls);
 
+    #[cfg(test)]
     let magic_aoe_entry_offset = sc.len();
+    #[cfg(not(test))]
+    let _magic_aoe_entry_offset = sc.len();
     let magic_aoe_branch = emit_magic_aoe_entry(&mut sc, &mut abs_fixups, &mut append_calls);
 
     let magic_aoe_ext_damage_entry_offset = sc.len();
@@ -396,7 +402,9 @@ fn build_shellcode(cave: u32, gettickcount_addr: u32) -> Shellcode {
     Shellcode {
         bytes: sc,
         attack_entry_offset,
+        #[cfg(test)]
         aoe_entry_offset,
+        #[cfg(test)]
         magic_aoe_entry_offset,
         magic_aoe_ext_damage_entry_offset,
     }
@@ -1215,7 +1223,7 @@ mod tests {
             .windows(6)
             .any(|w| w == [0x66, 0xC7, 0x47, 0x0C, 0x66, 0x30])); // "f0" word @ [edi+12]
         assert!(sc.windows(3).any(|w| w == [0x83, 0xC7, 0x0E])); // add edi, 14
-        // closing escape "\\fRf> )" + ' ' (unchanged)
+                                                                 // closing escape "\\fRf> )" + ' ' (unchanged)
         assert!(sc
             .windows(7)
             .any(|w| w == [0xC7, 0x47, 0x04, 0x66, 0x3E, 0x20, 0x29]));

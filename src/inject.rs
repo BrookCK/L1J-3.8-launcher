@@ -6,11 +6,15 @@ use anyhow::{bail, Result};
 use flate2::read::ZlibDecoder;
 use launcher::morph_auth::{morph_mac, MORPH_MAC_LEN};
 use std::io::Read as _;
+use std::thread;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HANDLE;
 
 const FILE_HOOK_ADDR: u32 = 0x0058788B;
 const FILE_RETN_ADDR: u32 = 0x0058794F;
 const EXPECTED_BYTES: u32 = 0x4D8D016A;
+const FILE_HOOK_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+const FILE_HOOK_WAIT_POLL: Duration = Duration::from_millis(50);
 
 pub fn morph_preprocess_enabled() -> bool {
     let Some(raw) = std::env::var_os("LOGIN38_MORPH_PREPROCESS") else {
@@ -98,7 +102,7 @@ pub fn load_inject_file(path: &str) -> Result<Vec<u8>> {
 
         if morph_preprocess_enabled() && decrypted.len() > 1 && decrypted[0] == b'S' {
             let text = String::from_utf8_lossy(&decrypted[1..]);
-            let (cleaned, _info) = smooth_run::strip_variant_lines(&text);
+            let cleaned = smooth_run::strip_variant_lines(&text);
             let mut buf = Vec::with_capacity(1 + cleaned.len());
             buf.push(b'S');
             buf.extend_from_slice(cleaned.as_bytes());
@@ -154,21 +158,27 @@ fn build_file_hook_shellcode(buffer_len: u32, data_addr: u32, sc_addr: u32) -> V
 
 pub fn start_file_hook_worker(h: HANDLE, pid: u32, buffer: &[u8]) -> Result<()> {
     log_line!("[FileHookWorker] waiting for target bytes @ 0x{FILE_HOOK_ADDR:08X}");
-    for _ in 0..12000 {
+    let started = Instant::now();
+    let mut last_val = 0u32;
+
+    while started.elapsed() < FILE_HOOK_WAIT_TIMEOUT {
         let val = memory::read_u32(h, FILE_HOOK_ADDR).unwrap_or(0);
+        last_val = val;
         if val == EXPECTED_BYTES {
             log_line!("[FileHookWorker] target bytes ready; installing");
             install_file_hook(h, pid, buffer)?;
             return Ok(());
         }
-        // 已被先前 worker 安裝(stage1 pre-resume worker → stage2 重複 spawn)→ 不重複裝。
         if (val & 0xFF) == 0xE9 {
             log_line!("[FileHookWorker] FileHook already installed (JMP detected); skipping");
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        thread::sleep(FILE_HOOK_WAIT_POLL);
     }
-    bail!("FileHook wait timed out before target bytes appeared");
+
+    bail!(
+        "FileHook wait timed out before target bytes appeared: last=0x{last_val:08X}, expected=0x{EXPECTED_BYTES:08X}"
+    );
 }
 
 pub fn install_file_hook(h: HANDLE, pid: u32, buffer: &[u8]) -> Result<u32> {

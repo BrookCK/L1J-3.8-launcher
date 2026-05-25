@@ -1,7 +1,9 @@
 //! 繁→簡字元對映 — 只給 LHX 視窗的 UI 字串顯示用。
 //! 詳細設計見 docs/superpowers/specs/2026-05-09-lhx-simplified-chinese-ui-design.md
 
-use crate::legacy_text::{set_text_encoding_mode, text_encoding_mode, TextEncodingMode};
+#[cfg(test)]
+use crate::legacy_text::set_text_encoding_mode;
+use crate::legacy_text::{text_encoding_mode, TextEncodingMode};
 use std::borrow::Cow;
 use std::iter::once;
 use windows::core::{PCWSTR, PWSTR};
@@ -26,6 +28,14 @@ static T2S: phf::Map<char, char> = phf::phf_map! {
     '經' => '经',  '裝' => '装',  '計' => '计',  '話' => '话',
     '說' => '说',  '變' => '变',  '輔' => '辅',  '遊' => '游',
     '鐘' => '钟',  '間' => '间',  '顯' => '显',  '驗' => '验',
+    '練' => '练',  '軸' => '轴',  '傳' => '传',  '關' => '关',
+    '閉' => '闭',  '儲' => '储',  '圍' => '围',  '範' => '范',
+    '遠' => '远',  '戰' => '战',  '標' => '标',  '礙' => '碍',
+    '記' => '记',  '憶' => '忆',  '敗' => '败',  '體' => '体',
+    '順' => '顺',  '復' => '复',  '確' => '确',  '認' => '认',
+    '殺' => '杀',  '離' => '离',  '開' => '开',  '續' => '续',
+    '換' => '换',  '轉' => '转',  '進' => '进',  '達' => '达',  '徑' => '径',
+    '蹤' => '踪',  '點' => '点',  '擇' => '择',  '獲' => '获',
 };
 
 pub fn tr(s: &str) -> Cow<'_, str> {
@@ -157,6 +167,7 @@ unsafe fn retranslate_one_tab_control(hwnd_tab: HWND) {
 /// 測試專用 — 強制 GBK 模式呼叫 tr() 一次。
 /// 不適用於 production 程式碼。
 #[doc(hidden)]
+#[cfg(test)]
 pub fn set_and_translate_for_test(s: &str) -> String {
     let prev = text_encoding_mode();
     set_text_encoding_mode(TextEncodingMode::Gbk);

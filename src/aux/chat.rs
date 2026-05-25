@@ -19,46 +19,11 @@ use windows::Win32::System::Threading::{CreateRemoteThread, WaitForSingleObject}
 
 use crate::memory;
 
-const CHAT_BUFFER_BASE: u32 = 0x0099_6D00;
-const CHAT_INDEX_ADDR: u32 = 0x0098_0EA0;
-const CHAT_ENTRY_SIZE: u32 = 0x126;
-const CHAT_RING_SIZE: u32 = 150;
-
 const CHAT_DISPATCH_FN: u32 = 0x0043_7500;
 
 /// RGB565 預設色(實測 2026-04-28 對應 \F0~\F4 palette)
 pub mod color {
-    pub const BLUE: u16 = 0x72DA; // \F0
-    pub const YELLOW: u16 = 0xFEC9; // \F1
-    pub const GREEN_PALETTE: u16 = 0x87CA; // \F2 — 偏淡綠
-    pub const PURPLE: u16 = 0xF314; // \F3
-    pub const WHITE: u16 = 0xFF96; // \F4
-    pub const RED: u16 = 0xF800; // 純紅(R=31,G=0,B=0)
     pub const GREEN: u16 = 0x07E0; // 純綠(R=0,G=63,B=0)
-}
-
-/// 路徑 A — 直接寫 ring buffer。**不觸發 auto-tail 副作用**。
-///
-/// `text_bytes` 必須是 ASCII 或 **Big5 已編碼** byte sequence。
-pub fn push_chat_line(h: HANDLE, text_bytes: &[u8], color: u16) -> Result<()> {
-    let index = memory::read_u32(h, CHAT_INDEX_ADDR)?;
-    if index >= CHAT_RING_SIZE {
-        anyhow::bail!("chat index {} 超出 ring size {}", index, CHAT_RING_SIZE);
-    }
-    let slot_addr = CHAT_BUFFER_BASE + index * CHAT_ENTRY_SIZE;
-
-    let mut entry = vec![0u8; CHAT_ENTRY_SIZE as usize];
-    let text_len = text_bytes.len().min(95);
-    entry[..text_len].copy_from_slice(&text_bytes[..text_len]);
-    entry[0x60..0x62].copy_from_slice(&color.to_le_bytes());
-    entry[0x62..0x64].copy_from_slice(&0xFFFF_u16.to_le_bytes());
-
-    memory::write_code(h, slot_addr, &entry)?;
-
-    let new_index = (index + 1) % CHAT_RING_SIZE;
-    memory::write_code(h, CHAT_INDEX_ADDR, &new_index.to_le_bytes())?;
-
-    Ok(())
 }
 
 /// 路徑 B — CreateRemoteThread 呼叫 ChatDispatch(0x00437500)。

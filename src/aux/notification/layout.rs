@@ -20,7 +20,7 @@ const FLOAT_FADE_START: Duration = Duration::from_millis(1_200);
 /// Float 上飄總像素。
 const FLOAT_DRIFT_PX: i32 = 80;
 
-pub fn toast_layout(
+pub(super) fn toast_layout(
     t: &LiveToast,
     slot: usize,
     _screen_w: i32,
@@ -35,12 +35,7 @@ pub fn toast_layout(
     }
 }
 
-pub fn float_layout(
-    f: &LiveFloat,
-    screen_w: i32,
-    screen_h: i32,
-    now: Instant,
-) -> Layout {
+pub(super) fn float_layout(f: &LiveFloat, screen_w: i32, screen_h: i32, now: Instant) -> Layout {
     let elapsed = now.duration_since(f.spawned_at);
     let drift = ((elapsed.as_micros() * FLOAT_DRIFT_PX as u128) / FLOAT_TTL.as_micros()) as i32;
     let kind_y_offset = match f.kind {

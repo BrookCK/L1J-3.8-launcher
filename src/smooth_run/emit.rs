@@ -9,19 +9,11 @@
 
 use std::collections::HashMap;
 
-use super::helpers::{parse_action_number, update_header_img_count, VariantInfo};
+use super::helpers::{parse_action_number, update_header_img_count};
 use super::types::{RunPairMap, SpriteFile};
 
-pub fn emit(sf: &SpriteFile, walk_to_run: &RunPairMap) -> (String, VariantInfo) {
+pub fn emit(sf: &SpriteFile, walk_to_run: &RunPairMap) -> String {
     let mut output = String::with_capacity(sf.raw_lines.iter().map(|l| l.len() + 1).sum());
-    let info = VariantInfo {
-        walk_sprites: Vec::new(),
-        run_sprites: Vec::new(),
-        run_actions: Default::default(),
-        walk_count: 0,
-        run_count: 0,
-        converted_count: walk_to_run.len(),
-    };
 
     // 建立 sid → &Sprite map(O(1) 查找,避免 O(N×S) 線性掃描 — 對 12K sprites
     // × 250K raw lines 的真實檔案會差 5×)
@@ -154,7 +146,7 @@ pub fn emit(sf: &SpriteFile, walk_to_run: &RunPairMap) -> (String, VariantInfo) 
         output.push('\n');
     }
 
-    (output, info)
+    output
 }
 
 #[cfg(test)]
@@ -171,7 +163,7 @@ mod tests {
         let roles = classify(&sf);
         let runs = extract(&sf, &roles);
         let pairs = pair_walks_to_runs(&sf, &roles, &runs);
-        let (output, _) = emit(&sf, &pairs);
+        let output = emit(&sf, &pairs);
         assert!(output.contains("98.walk(1 8,8.0:2"));
         assert!(output.contains("99.walk(1 8,16.0:2"));
     }

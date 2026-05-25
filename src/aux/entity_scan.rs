@@ -37,7 +37,7 @@ use windows::Win32::System::Memory::{
 };
 
 use crate::log_line;
-use crate::memory::{read_bytes, read_u32};
+use crate::memory::{read_bytes, read_u16, read_u32};
 
 /// Player class vfptr — local + remote + 自己 avatar + 召喚物(2026-05-03 RE 驗證)
 const PLAYER_VFPTR: u32 = 0x008D_C08C;
@@ -45,6 +45,13 @@ const PLAYER_VFPTR: u32 = 0x008D_C08C;
 const G_PLAYER_PTR: u32 = 0x00C2_D2B8;
 /// Entity `+0x0C` = target_id(送 `cdd 0xA4` packet 第二個 d)
 const OFFSET_TARGET_ID: u32 = 0x0C;
+/// Entity `+0x18` = sprite_id u16(對應 SPR.txt 的 `#<sprite_id>` entry)
+const OFFSET_SPRITE_ID: u32 = 0x18;
+const OFFSET_ACTION_STATE: u32 = 0x14;
+/// Entity `+0x34` = raw X(壓縮值);送 `cccdhh` 前要解碼:`((raw-0x8000)>>1)+0x8000`
+const OFFSET_RAW_X: u32 = 0x34;
+/// Entity `+0x38` = Y(原值,送 packet 直接用)
+const OFFSET_Y: u32 = 0x38;
 /// 三個 name offset 候選 — 不同 entity 類型 / 不同 deref 解出的字串可能在不同位置
 const OFFSET_NAME_PTRS: [u32; 3] = [0x60, 0x64, 0x6C];
 /// 名字最多 32 bytes(Lineage 3.8 角色名 16 Big5 char ≈ 32 bytes 上限)
@@ -65,6 +72,15 @@ pub struct ScannedEntity {
     pub target_id: u32,
     /// 命中的名字字串(三個 offset 中任一精確 / starts_with 匹配的那個)
     pub name: String,
+    /// `+0x18` u16 — 對應 SPR.txt 的 `#<sprite_id>` 編號,用 `sprite_catalog`
+    /// 查 `102.type` 過濾怪物 / 路燈 / NPC
+    pub sprite_id: u16,
+    /// `+0x14` action/state byte. 0x00 is normal world monster state; 0x08 is death.
+    pub action_state: u8,
+    /// `+0x34` raw X(壓縮);送 `cccdhh` 前要 `decode_x` 還原 display 值
+    pub raw_x: u32,
+    /// `+0x38` Y(直讀;送 packet 直接用)
+    pub y: u32,
 }
 
 /// 從 `+0x60`、`+0x64`、`+0x6C` 三個欄位讀出來的 name 候選 — diagnostic 用。
@@ -73,6 +89,13 @@ pub struct EntityNames {
     pub addr: u32,
     pub target_id: u32,
     pub names: [Option<String>; 3],
+    /// `+0x18` u16 sprite_id(同 ScannedEntity)
+    pub sprite_id: u16,
+    pub action_state: u8,
+    /// `+0x34` raw X(壓縮)
+    pub raw_x: u32,
+    /// `+0x38` Y(直讀)
+    pub y: u32,
 }
 
 /// 掃 heap 找名字符合 `query` 的 entity。
@@ -103,6 +126,10 @@ pub fn find_entity_by_name(h: HANDLE, query: &str) -> Result<Option<ScannedEntit
                 addr: info.addr,
                 target_id: info.target_id,
                 name: matched.clone(),
+                sprite_id: info.sprite_id,
+                action_state: info.action_state,
+                raw_x: info.raw_x,
+                y: info.y,
             }));
         }
     }
@@ -120,6 +147,10 @@ pub fn find_entity_by_name(h: HANDLE, query: &str) -> Result<Option<ScannedEntit
                 addr: info.addr,
                 target_id: info.target_id,
                 name: matched.clone(),
+                sprite_id: info.sprite_id,
+                action_state: info.action_state,
+                raw_x: info.raw_x,
+                y: info.y,
             }));
         }
     }
@@ -139,6 +170,10 @@ pub fn find_entity_by_name(h: HANDLE, query: &str) -> Result<Option<ScannedEntit
                     addr: info.addr,
                     target_id: info.target_id,
                     name: nt.to_string(),
+                    sprite_id: info.sprite_id,
+                    action_state: info.action_state,
+                    raw_x: info.raw_x,
+                    y: info.y,
                 }));
             }
         }
@@ -198,10 +233,112 @@ pub fn dump_entity_candidates(h: HANDLE) {
     }
 }
 
+/// 輕量 entity address + 位置 + sprite_id — minimap 用,**不撈 name**。
+///
+/// 為什麼有這個:`list_all_entities` 每個 entity 要 3 個 name ptr deref + decode,
+/// N=30 entity 大概 100ms+ 額外讀記憶體。 minimap 只畫紅點不顯示名字 →
+/// 完全 skip name 段,只讀 `target_id` + `sprite_id` + `raw_x` + `y`。
+///
+/// **stale slot 過濾**:`target_id == 0` 視為未初始化或 dead slot,跳過。
+/// 真實活著的 entity 都有 server 配的非零 ID。
+///
+/// 仍會做 heap scan(找 vfptr),caller 想 cache 自己 cache。 回傳:
+/// `(addr, target_id, sprite_id, raw_x, y)` — minimap 用 sprite_id 過 `is_mob`。
+pub fn list_entity_positions(h: HANDLE) -> Vec<(u32, u32, u16, u8, u32, u32)> {
+    let addrs = match enumerate_player_entities(h) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    addrs
+        .into_iter()
+        .filter_map(|addr| {
+            let target_id = read_u32(h, addr + OFFSET_TARGET_ID).ok()?;
+            if target_id == 0 {
+                return None; // stale / uninitialized slot
+            }
+            let sprite_id = read_u16(h, addr + OFFSET_SPRITE_ID).ok()?;
+            let action_state = read_bytes(h, addr + OFFSET_ACTION_STATE, 1)
+                .ok()
+                .and_then(|b| b.first().copied())?;
+            let raw_x = read_u32(h, addr + OFFSET_RAW_X).ok()?;
+            let y = read_u32(h, addr + OFFSET_Y).ok()?;
+            Some((addr, target_id, sprite_id, action_state, raw_x, y))
+        })
+        .collect()
+}
+
+/// 讀單一已知 entity 的位置 + sprite_id — caller 已 cache addr,只 refresh。
+///
+/// Sanity check:
+/// - `addr+0x00` 必須是 `PLAYER_VFPTR`(entity 沒被 free)
+/// - `target_id != 0`(slot 沒被 reset 成 dead state)
+///
+/// vfptr / target_id 異常 → None,caller 應該把這 addr 從 cache 丟掉。
+/// 回傳 `(target_id, sprite_id, raw_x, y)`。
+pub fn read_entity_position(h: HANDLE, addr: u32) -> Option<(u32, u16, u8, u32, u32)> {
+    let vfptr = read_u32(h, addr).ok()?;
+    if vfptr != PLAYER_VFPTR {
+        return None;
+    }
+    let target_id = read_u32(h, addr + OFFSET_TARGET_ID).ok()?;
+    if target_id == 0 {
+        return None;
+    }
+    let sprite_id = read_u16(h, addr + OFFSET_SPRITE_ID).ok()?;
+    let action_state = read_bytes(h, addr + OFFSET_ACTION_STATE, 1)
+        .ok()
+        .and_then(|b| b.first().copied())?;
+    let raw_x = read_u32(h, addr + OFFSET_RAW_X).ok()?;
+    let y = read_u32(h, addr + OFFSET_Y).ok()?;
+    Some((target_id, sprite_id, action_state, raw_x, y))
+}
+
+/// 列出 heap 所有 player-class entity,每筆已 deref name + target_id。
+///
+/// 失敗(讀記憶體錯誤、未進場)→ 回傳空 Vec 而非 Err,讓 caller 簡化呼叫。
+/// name 取三個候選 offset 中第一個非空字串。
+pub fn list_all_entities(h: HANDLE) -> Vec<ScannedEntity> {
+    let candidates = match enumerate_player_entities(h) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(candidates.len());
+    for entity_addr in candidates {
+        let info = read_entity_names(h, entity_addr);
+        let name = info
+            .names
+            .iter()
+            .flatten()
+            .map(|n| n.trim().to_string())
+            .find(|n| !n.is_empty())
+            .unwrap_or_default();
+        out.push(ScannedEntity {
+            addr: info.addr,
+            target_id: info.target_id,
+            name,
+            sprite_id: info.sprite_id,
+            action_state: info.action_state,
+            raw_x: info.raw_x,
+            y: info.y,
+        });
+    }
+    out
+}
+
 /// 列出 heap 所有看起來像 player class entity 的位址(vfptr 對齊 + 命中)。
 ///
 /// 不做進一步驗證 —— caller 用 `read_entity_names` 取詳細欄位。
-fn enumerate_player_entities(h: HANDLE) -> Result<Vec<u32>> {
+pub(crate) fn read_entity_display_name(h: HANDLE, entity_addr: u32) -> String {
+    read_entity_names(h, entity_addr)
+        .names
+        .iter()
+        .flatten()
+        .map(|n| n.trim().to_string())
+        .find(|n| !n.is_empty())
+        .unwrap_or_default()
+}
+
+pub(crate) fn enumerate_player_entities(h: HANDLE) -> Result<Vec<u32>> {
     let mut hits = Vec::new();
     let vfptr_le = PLAYER_VFPTR.to_le_bytes();
     let mut addr = HEAP_SCAN_START;
@@ -266,6 +403,13 @@ fn enumerate_player_entities(h: HANDLE) -> Result<Vec<u32>> {
 /// 通常是空 entity slot,name 也會 deref 失敗。
 fn read_entity_names(h: HANDLE, entity_addr: u32) -> EntityNames {
     let target_id = read_u32(h, entity_addr + OFFSET_TARGET_ID).unwrap_or(0);
+    let sprite_id = read_u16(h, entity_addr + OFFSET_SPRITE_ID).unwrap_or(0);
+    let action_state = read_bytes(h, entity_addr + OFFSET_ACTION_STATE, 1)
+        .ok()
+        .and_then(|b| b.first().copied())
+        .unwrap_or(0);
+    let raw_x = read_u32(h, entity_addr + OFFSET_RAW_X).unwrap_or(0);
+    let y = read_u32(h, entity_addr + OFFSET_Y).unwrap_or(0);
     let mut names: [Option<String>; 3] = Default::default();
     for (i, &off) in OFFSET_NAME_PTRS.iter().enumerate() {
         let name_ptr = read_u32(h, entity_addr + off).unwrap_or(0);
@@ -278,6 +422,10 @@ fn read_entity_names(h: HANDLE, entity_addr: u32) -> EntityNames {
         addr: entity_addr,
         target_id,
         names,
+        sprite_id,
+        action_state,
+        raw_x,
+        y,
     }
 }
 

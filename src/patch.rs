@@ -22,18 +22,34 @@ const CONDITIONAL_PATCH_VAL: u32 = 0x0097E990; // 90 E9 97 00
 // PatchCode_Point1
 const PATCHCODE1_ADDR: u32 = 0x00722761;
 const PATCHCODE1_VAL: u32 = 0x859001B0;
+const TEXT_LOCALE_CODEPAGE_ADDR: u32 = 0x00968618;
+const TEXT_LOCALE_SIMPLIFIED_CODEPAGE: u32 = 0x000003A8;
+const FORCE_TEXT_LOCALE_TIMEOUT_MS: u64 = 8_000;
+const FORCE_TEXT_LOCALE_POLL_MS: u64 = 50;
+const SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR: u32 = 0x00504A6D;
+const SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ORIGINAL: &[u8] = &[0x0F, 0xB6, 0xC8, 0x85, 0xC9, 0x74];
+const SIMPLIFIED_STATUS_TOOLTIP_ENCODING_PATCHED: &[u8] = &[0x90; 6];
+const SIMPLIFIED_STATUS_TOOLTIP_ENCODING_TIMEOUT_MS: u64 = 8_000;
+const SIMPLIFIED_STATUS_TOOLTIP_ENCODING_POLL_MS: u64 = 50;
+#[cfg(test)]
 const FILE_HOOK_ADDR: u32 = 0x0058788B;
+#[cfg(test)]
 const FILE_HOOK_EXPECTED_NEW: u32 = 0x4D8D016A;
+#[cfg(test)]
 const FILE_HOOK_EXPECTED_OLD: u32 = 0x85C0B60F;
+#[cfg(test)]
 const PATHCODE_PATCH_ADDR: u32 = 0x00772BA0;
+#[cfg(test)]
 const USER_HOOK_ADDR: u32 = 0x0077317D;
 
 const TEXT_SCAN_START: u32 = 0x00401000;
 const TEXT_SCAN_END: u32 = 0x00830000;
 const DECRYPT_WAIT_TIMEOUT_MS: u64 = 120_000;
 const DECRYPT_POLL_INTERVAL_MS: u64 = 50;
+#[cfg(test)]
 pub const QUICK_DECRYPT_WAIT_TIMEOUT_MS: u64 = 2_000;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecryptMarkerState {
     Ready,
@@ -41,12 +57,14 @@ pub enum DecryptMarkerState {
     NotReady(u32),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitAndPatchOutcome {
     Patched,
     NotReady { last_value: u32 },
 }
 
+#[cfg(test)]
 pub(crate) fn classify_decrypt_marker_value(value: u32) -> DecryptMarkerState {
     match value {
         DECRYPT_EXPECTED => DecryptMarkerState::Ready,
@@ -55,6 +73,7 @@ pub(crate) fn classify_decrypt_marker_value(value: u32) -> DecryptMarkerState {
     }
 }
 
+#[cfg(test)]
 fn apply_time_guard_patches(h: HANDLE, pid: u32, already_patched: bool) -> Result<()> {
     let patch1 = CONDITIONAL_PATCH_VAL.to_le_bytes();
     if already_patched {
@@ -93,6 +112,145 @@ fn apply_time_guard_patches(h: HANDLE, pid: u32, already_patched: bool) -> Resul
     Ok(())
 }
 
+pub fn spawn_force_simplified_text_locale_worker(h: HANDLE) {
+    let h_raw = h.0 as usize;
+    std::thread::spawn(move || {
+        let h = HANDLE(h_raw as *mut _);
+        let start = Instant::now();
+        let timeout = Duration::from_millis(FORCE_TEXT_LOCALE_TIMEOUT_MS);
+        let target = TEXT_LOCALE_SIMPLIFIED_CODEPAGE.to_le_bytes();
+        let mut first_value = None;
+        let mut last_value = None;
+        let mut wrote = false;
+        let mut last_err = None;
+
+        while start.elapsed() < timeout {
+            match memory::read_u32(h, TEXT_LOCALE_CODEPAGE_ADDR) {
+                Ok(current) => {
+                    first_value.get_or_insert(current);
+                    last_value = Some(current);
+                    if current != TEXT_LOCALE_SIMPLIFIED_CODEPAGE {
+                        match memory::write_code(h, TEXT_LOCALE_CODEPAGE_ADDR, &target) {
+                            Ok(()) => wrote = true,
+                            Err(e) => last_err = Some(format!("{e:#}")),
+                        }
+                    } else {
+                        wrote = true;
+                    }
+                }
+                Err(e) => last_err = Some(format!("{e:#}")),
+            }
+            std::thread::sleep(Duration::from_millis(FORCE_TEXT_LOCALE_POLL_MS));
+        }
+
+        if wrote {
+            let first = first_value.unwrap_or(0);
+            let last = last_value.unwrap_or(0);
+            log_line!(
+                "[patch-text] forced text locale @ 0x{TEXT_LOCALE_CODEPAGE_ADDR:08X}: first=0x{first:08X} last=0x{last:08X} target=0x{TEXT_LOCALE_SIMPLIFIED_CODEPAGE:08X}"
+            );
+        } else if let Some(err) = last_err {
+            log_line!("[patch-text] forced text locale failed: {err}");
+        } else {
+            log_line!("[patch-text] forced text locale failed: no readable sample");
+        }
+    });
+}
+
+pub fn spawn_simplified_status_tooltip_encoding_worker(h: HANDLE) {
+    let h_raw = h.0 as usize;
+    std::thread::spawn(move || {
+        let h = HANDLE(h_raw as *mut _);
+        let start = Instant::now();
+        let timeout = Duration::from_millis(SIMPLIFIED_STATUS_TOOLTIP_ENCODING_TIMEOUT_MS);
+        let mut last_locale = None;
+        let mut last_sample = None;
+        let mut last_err = None;
+
+        while start.elapsed() < timeout {
+            match memory::read_u32(h, TEXT_LOCALE_CODEPAGE_ADDR) {
+                Ok(locale) => {
+                    last_locale = Some(locale);
+                    if locale != TEXT_LOCALE_SIMPLIFIED_CODEPAGE {
+                        std::thread::sleep(Duration::from_millis(
+                            SIMPLIFIED_STATUS_TOOLTIP_ENCODING_POLL_MS,
+                        ));
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(format!("{e:#}"));
+                    std::thread::sleep(Duration::from_millis(
+                        SIMPLIFIED_STATUS_TOOLTIP_ENCODING_POLL_MS,
+                    ));
+                    continue;
+                }
+            }
+
+            match memory::read_bytes(
+                h,
+                SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR,
+                SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ORIGINAL.len(),
+            ) {
+                Ok(current) if current == SIMPLIFIED_STATUS_TOOLTIP_ENCODING_PATCHED => {
+                    log_line!(
+                        "[patch-text] simplified status tooltip encoding already patched @ 0x{SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR:08X}"
+                    );
+                    return;
+                }
+                Ok(current) if current == SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ORIGINAL => {
+                    match memory::write_code(
+                        h,
+                        SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR,
+                        SIMPLIFIED_STATUS_TOOLTIP_ENCODING_PATCHED,
+                    ) {
+                        Ok(()) => {
+                            log_line!(
+                                "[patch-text] simplified status tooltip encoding patched @ 0x{SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR:08X}"
+                            );
+                            return;
+                        }
+                        Err(e) => last_err = Some(format!("{e:#}")),
+                    }
+                }
+                Ok(current) => last_sample = Some(hex_bytes(&current)),
+                Err(e) => last_err = Some(format!("{e:#}")),
+            }
+            std::thread::sleep(Duration::from_millis(
+                SIMPLIFIED_STATUS_TOOLTIP_ENCODING_POLL_MS,
+            ));
+        }
+
+        if let Some(locale) = last_locale {
+            if locale != TEXT_LOCALE_SIMPLIFIED_CODEPAGE {
+                log_line!(
+                    "[patch-text] simplified status tooltip encoding skipped: locale=0x{locale:08X}"
+                );
+                return;
+            }
+        }
+
+        if let Some(sample) = last_sample {
+            log_line!(
+                "[patch-text] simplified status tooltip encoding not patched @ 0x{SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR:08X}: current={sample}"
+            );
+        } else if let Some(err) = last_err {
+            log_line!("[patch-text] simplified status tooltip encoding failed: {err}");
+        } else {
+            log_line!("[patch-text] simplified status tooltip encoding failed: no readable sample");
+        }
+    });
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
 pub fn try_wait_and_patch(h: HANDLE, pid: u32, timeout_ms: u64) -> Result<WaitAndPatchOutcome> {
     log_line!("[patch-time] quick wait_and_patch timeout={timeout_ms}ms");
 
@@ -176,6 +334,7 @@ const MOVE_PACKET_ENCRYPTION_PATTERN: &[u8] = &[
     0x00, 0x0F, 0xBE, 0x48, 0x15, 0x83, 0xF1, 0x49,
 ];
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct StartupProbe {
     name: &'static str,
@@ -183,6 +342,7 @@ struct StartupProbe {
     expected: Option<u32>,
 }
 
+#[cfg(test)]
 pub fn spawn_startup_probe(h: HANDLE) {
     let h_raw = h.0 as usize;
     std::thread::spawn(move || {
@@ -935,5 +1095,21 @@ mod tests {
             classify_decrypt_marker_value(0xD34C608D),
             DecryptMarkerState::NotReady(0xD34C608D)
         );
+    }
+
+    #[test]
+    fn force_simplified_text_locale_targets_codepage_global() {
+        assert_eq!(TEXT_LOCALE_CODEPAGE_ADDR, 0x00968618);
+        assert_eq!(TEXT_LOCALE_SIMPLIFIED_CODEPAGE, 0x000003A8);
+    }
+
+    #[test]
+    fn simplified_status_tooltip_encoding_patch_targets_known_branch() {
+        assert_eq!(SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ADDR, 0x00504A6D);
+        assert_eq!(
+            SIMPLIFIED_STATUS_TOOLTIP_ENCODING_ORIGINAL,
+            &[0x0F, 0xB6, 0xC8, 0x85, 0xC9, 0x74]
+        );
+        assert_eq!(SIMPLIFIED_STATUS_TOOLTIP_ENCODING_PATCHED, &[0x90; 6]);
     }
 }

@@ -53,8 +53,7 @@ const MAP_ENTRY: u32 = 8;
 
 // blit hook 常數
 const BLIT_B_ADDR: u32 = 0x00555CE0; // blit_B runtime 位址
-const BLIT_PROLOGUE: [u8; 6] = [0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14];
-// blit codecave data 偏移
+                                     // blit codecave data 偏移
 const BLIT_OFF_SCREEN_POS: u32 = 0x80; // [(x:4, y:4)] × N — blit hook 寫（必須在 shellcode 之後！）
 const BLIT_OFF_COUNT: u32 = 0x60;
 const BLIT_OFF_SURF_PTRS_ADDR: u32 = 0x64; // 指向 draw cave 的 surf_ptrs
@@ -72,10 +71,6 @@ pub struct HoverHookResult {
 }
 
 /// 取得 hover count 在 codecave 中的位址（供 connect hook 重置用）
-pub fn hover_count_addr(cave_draw: u32) -> u32 {
-    cave_draw + OFF_COUNT
-}
-
 pub fn install_img_hover_hook(h: HANDLE, pid: u32) -> Result<Option<HoverHookResult>> {
     log_line!("\n--- img hover hook（v21: 學習+重播雙模式）---");
 
@@ -295,209 +290,6 @@ pub fn install_img_hover_hook(h: HANDLE, pid: u32) -> Result<Option<HoverHookRes
         draw_hook_bytes,
         draw_orig_bytes,
     }))
-}
-
-/// 組裝 draw hook codecave（舊版，已被 v2 取代）
-#[allow(dead_code)]
-fn _build_draw_hook_old(cave_addr: u32, draw_addr: u32, gsr_orig: u32, surf_mgr: u32) -> Vec<u8> {
-    let mut sc: Vec<u8> = Vec::with_capacity(96);
-    let a_count = cave_addr + OFF_COUNT;
-    let a_map = cave_addr + OFF_MAP;
-
-    // === 讀 src_id ===
-    // push eax; push edx; push esi
-    sc.push(0x50);
-    sc.push(0x52);
-    sc.push(0x56);
-
-    // mov eax, [ebp-0x44]    ; element ptr
-    sc.extend_from_slice(&[0x8B, 0x45, 0xBC]); // 0xBC = -0x44 as u8
-                                               // mov edx, [eax+0x20]    ; src_id
-    sc.extend_from_slice(&[0x8B, 0x50, 0x20]);
-
-    // === 掃描映射表 ===
-    sc.extend_from_slice(&[0x8B, 0x35]); // mov esi, [a_count]
-    sc.extend_from_slice(&a_count.to_le_bytes());
-    sc.push(0x50); // push eax (save element ptr)
-    sc.push(0xB8); // mov eax, a_map
-    sc.extend_from_slice(&a_map.to_le_bytes());
-
-    let scan_off = sc.len();
-    sc.extend_from_slice(&[0x85, 0xF6]); // test esi, esi
-    sc.push(0x74);
-    let jz_nm = sc.len();
-    sc.push(0x00); // jz .no_match
-    sc.extend_from_slice(&[0x39, 0x10]); // cmp [eax], edx (compare map.src_id with edx=src_id)
-    sc.push(0x74);
-    let je_found = sc.len();
-    sc.push(0x00); // je .found
-    sc.extend_from_slice(&[0x83, 0xC0, MAP_ENTRY as u8]); // add eax, 8
-    sc.push(0x4E); // dec esi
-    sc.push(0xEB);
-    let jmp_scan = sc.len();
-    sc.push(0x00);
-    sc[jmp_scan] = (scan_off as u8).wrapping_sub((jmp_scan + 1) as u8);
-
-    // .no_match:
-    let nm_off = sc.len();
-    sc[jz_nm] = (nm_off - jz_nm - 1) as u8;
-    sc.push(0x58); // pop eax (discard saved element ptr)
-    sc.push(0xEB);
-    let jmp_done = sc.len();
-    sc.push(0x00); // jmp .done
-
-    // .found: eax = &map_entry, edx = src_id
-    let found_off = sc.len();
-    sc[je_found] = (found_off - je_found - 1) as u8;
-    sc.push(0x58); // pop eax (discard saved element ptr)
-
-    // 永遠替換模式（暫時不檢查 hover，先測 draw hook 有效性）
-    // 取 highlight_id
-    // eax 被 pop 了，需要重新載入 map entry... 改用不同方式
-
-    // 重新載入 map entry: edx 仍有 src_id，重掃一次太慢
-    // 改用更簡單的方式：在 scan 時保存 eax（map entry ptr）
-
-    // 其實上面 pop eax 丟棄的是 element ptr，而 eax 在 scan loop 結束時指向匹配的 entry。
-    // 但 pop eax 覆蓋了它。改設計：用 esi 保存 entry。
-
-    // 重新設計，更簡潔：
-    // 算了，讓我重寫。上面的設計有 register 衝突。
-
-    sc.clear();
-
-    // === 重新設計 ===
-    // push eax; push edx
-    sc.push(0x50);
-    sc.push(0x52);
-
-    // mov eax, [ebp-0x44]    ; element
-    sc.extend_from_slice(&[0x8B, 0x45, 0xBC]);
-    // mov eax, [eax+0x20]    ; src_id
-    sc.extend_from_slice(&[0x8B, 0x40, 0x20]);
-    // eax = src_id
-
-    // 掃描映射表（用 edx 做 counter/pointer）
-    push_scan_loop(&mut sc, cave_addr, a_count, a_map);
-
-    // jmp 到 .done（scan_loop 內部處理了 found/not_found）
-    // scan_loop 會設置 ecx = highlight surface 或保持不變
-
-    // pop edx; pop eax
-    sc.push(0x5A);
-    sc.push(0x58);
-
-    // jmp draw
-    sc.push(0xE9);
-    let jmp_from = cave_addr + sc.len() as u32 + 4;
-    sc.extend_from_slice(&draw_addr.wrapping_sub(jmp_from).to_le_bytes());
-
-    sc
-}
-
-/// 組裝映射表掃描 + 替換邏輯
-/// 進入: eax = src_id, ecx = current surface
-/// 出口: ecx = (可能替換的) surface
-fn push_scan_loop(sc: &mut Vec<u8>, cave_addr: u32, a_count: u32, a_map: u32) {
-    let gsr_orig = cave_addr + 0x60; // GetSurfResource original trampoline
-    let surf_mgr_addr = cave_addr + OFF_SURF_MGR;
-
-    // push esi; push edi
-    sc.push(0x56);
-    sc.push(0x57);
-
-    // mov esi, [a_count]
-    sc.extend_from_slice(&[0x8B, 0x35]);
-    sc.extend_from_slice(&a_count.to_le_bytes());
-    // mov edi, a_map
-    sc.push(0xBF);
-    sc.extend_from_slice(&a_map.to_le_bytes());
-
-    let scan_off = sc.len();
-    // test esi, esi
-    sc.extend_from_slice(&[0x85, 0xF6]);
-    // jz .no_match
-    sc.push(0x74);
-    let jz_nm = sc.len();
-    sc.push(0x00);
-    // cmp [edi], eax (map.src_id == src_id?)
-    sc.extend_from_slice(&[0x39, 0x07]);
-    // je .found
-    sc.push(0x74);
-    let je_found = sc.len();
-    sc.push(0x00);
-    // add edi, 8; dec esi; jmp .scan
-    sc.extend_from_slice(&[0x83, 0xC7, MAP_ENTRY as u8]);
-    sc.push(0x4E);
-    sc.push(0xEB);
-    let jmp_scan = sc.len();
-    sc.push(0x00);
-    sc[jmp_scan] = (scan_off as u8).wrapping_sub((jmp_scan + 1) as u8);
-
-    // .no_match:
-    let nm_off = sc.len();
-    sc[jz_nm] = (nm_off - jz_nm - 1) as u8;
-    // pop edi; pop esi; ret (不替換)
-    sc.push(0x5F);
-    sc.push(0x5E);
-    sc.push(0xEB);
-    let jmp_end = sc.len();
-    sc.push(0x00); // jmp .end
-
-    // .found: edi = &map_entry, [edi+4] = highlight_id
-    let found_off = sc.len();
-    sc[je_found] = (found_off - je_found - 1) as u8;
-
-    // 永遠替換（測試版 — 不檢查 g_hover_id）
-    // 呼叫 GetSurfResource_original(highlight_id)
-    // push highlight_id
-    sc.extend_from_slice(&[0xFF, 0x77, 0x04]); // push [edi+4] = highlight_id
-                                               // mov ecx, [surf_mgr_addr]
-    sc.extend_from_slice(&[0x8B, 0x0D]);
-    sc.extend_from_slice(&surf_mgr_addr.to_le_bytes());
-    // call gsr_orig (original GetSurfResource, no hook)
-    sc.push(0xE8);
-    let call_from = cave_addr + sc.len() as u32 + 4; // approximate, adjusted later
-                                                     // 需要知道 sc 在 cave 中的偏移... 但 push_scan_loop 是被 build_draw_hook 呼叫的
-                                                     // sc 的偏移 = build_draw_hook 呼叫前的長度 + 當前長度
-                                                     // 這不好計算，用一個 placeholder 然後修正
-    let call_fixup = sc.len();
-    sc.extend_from_slice(&[0; 4]); // placeholder
-
-    // GetSurfResource returns in eax, ret 4 cleans highlight_id
-    // ecx = eax (highlight surface)
-    sc.extend_from_slice(&[0x8B, 0xC8]); // mov ecx, eax
-
-    // pop edi; pop esi
-    sc.push(0x5F);
-    sc.push(0x5E);
-
-    // .end:
-    let end_off = sc.len();
-    sc[jmp_end] = (end_off - jmp_end - 1) as u8;
-
-    // 修正 call gsr_orig 的 rel32
-    // 問題：我們不知道 sc 在整個 shellcode 中的偏移
-    // 需要在 build_draw_hook 裡修正
-    // 標記位置供外部修正
-    // 用一個 hack：在 scan_loop 開頭記錄起始偏移
-
-    // 暫時用絕對地址跳轉代替 rel32 call
-    // 改用 call [addr] 間接呼叫
-    // 但 GetSurfResource 是 thiscall + push arg，不能用 call [addr]
-
-    // 最簡單：改用 FF 15 (call [imm32]) 間接呼叫
-    // 但 GetSurfResource original trampoline 不是存在指標裡，它是一段代碼
-    // 需要用 E8 rel32 直接 call
-
-    // 問題：push_scan_loop 不知道自己在整體 shellcode 中的偏移
-    // 解決：讓 build_draw_hook 在呼叫後修正 rel32
-
-    // 在 call_fixup 位置留下一個標記，讓 build_draw_hook 計算並填入正確的 rel32
-    // 返回 call_fixup 的位置給外部
-    // 但 Rust 函數已經返回... 用一個 known pattern 做標記
-
-    // 算了，把整個邏輯放在 build_draw_hook 裡，不要用子函數
 }
 
 // draw hook v21: 學習+重播雙模式（重播模式不讀 [ebp-0x44]，防重登閃退）
@@ -853,7 +645,7 @@ pub fn poll_hover_tick(
         if sx == 0 && sy == 0 {
             continue;
         }
-        let src_id = u32::from_le_bytes(map_data[i * 8..i * 8 + 4].try_into().unwrap());
+        let _src_id = u32::from_le_bytes(map_data[i * 8..i * 8 + 4].try_into().unwrap());
 
         // client = blit * 3/2 + offset
         let screen_left = sx * 3 / 2 + off_x;
@@ -883,6 +675,7 @@ pub fn poll_hover_tick(
                 let sid = u32::from_le_bytes(map_data[i * 8..i * 8 + 4].try_into().unwrap());
                 let cl = sx * 3 / 2 + off_x;
                 let ct = sy * 3 / 2 + off_y;
+                let _ = (sid, cl, ct);
                 debug_log!(
                     "[hover] #{sid}: blit=({sx},{sy}) → client=({cl},{ct})~({},{})",
                     cl + 90,
@@ -906,7 +699,7 @@ pub fn poll_hover_tick(
 }
 
 /// 掃描 heap 記憶體找 highlight="#XXXX" pattern，動態建立映射
-fn scan_highlight_mappings(h: HANDLE, elem_ptr: u32) -> Vec<(u32, u32)> {
+fn scan_highlight_mappings(h: HANDLE, _elem_ptr: u32) -> Vec<(u32, u32)> {
     // 搜尋 ASCII pattern: highlight="#
     let pattern: Vec<Option<u8>> = b"highlight=\"#".iter().map(|&b| Some(b)).collect();
 
@@ -1067,6 +860,7 @@ fn scan_element_chain_for_highlight(h: HANDLE, start_elem: u32) {
     let mut found_any = false;
     while cur != 0 && cur > 0x10000 && idx < 50 {
         let src_id = memory::read_u32(h, cur + 0x20).unwrap_or(0);
+        let _ = src_id;
 
         // 讀取大量文字（+0x04 開始到 +0x200）
         if let Ok(raw) = memory::read_bytes(h, cur + 0x04, 0x200) {
@@ -1080,6 +874,7 @@ fn scan_element_chain_for_highlight(h: HANDLE, start_elem: u32) {
                     let start = pos.saturating_sub(30);
                     let end = (pos + 40).min(text.len());
                     let ctx = &text[start..end];
+                    let _ = (start, end, ctx);
                     debug_log!("[scan]   上下文: ...{ctx}...");
                 }
                 found_any = true;
@@ -1090,6 +885,7 @@ fn scan_element_chain_for_highlight(h: HANDLE, start_elem: u32) {
                 if let Some(pos) = lower.find("<img") {
                     let end = (pos + 80).min(text.len());
                     let ctx = &text[pos..end];
+                    let _ = (end, ctx);
                     debug_log!("[scan] 元素 #{idx}: 找到 <img>: {ctx}");
                     found_any = true;
                 }
@@ -1120,6 +916,7 @@ fn scan_element_chain_for_highlight(h: HANDLE, start_elem: u32) {
                             if let Some(pos) = lower.find("highlight") {
                                 let start = pos.saturating_sub(20);
                                 let end = (pos + 60).min(text.len());
+                                let _ = (start, end);
                                 debug_log!("[scan]   {}", &text[start..end]);
                             }
                         }
@@ -1184,6 +981,7 @@ pub fn log_calibration(h: HANDLE, cave_draw: u32, blit_cave: u32, cursor_x: i32,
     // log
     if let Ok(map_data) = memory::read_bytes(h, cave_draw + OFF_MAP, n * MAP_ENTRY as usize) {
         let sid = u32::from_le_bytes(map_data[best_idx * 8..best_idx * 8 + 4].try_into().unwrap());
+        let _ = sid;
         debug_log!(
             "[F6] cursor=({cursor_x},{cursor_y}) 校準圖片=#{sid} blit=({best_sx},{best_sy})"
         );
@@ -1198,6 +996,7 @@ pub fn log_calibration(h: HANDLE, cave_draw: u32, blit_cave: u32, cursor_x: i32,
             let sid = u32::from_le_bytes(map_data[i * 8..i * 8 + 4].try_into().unwrap());
             let l = sx * 3 / 2 + new_off_x;
             let t = sy * 3 / 2 + new_off_y;
+            let _ = (sid, l, t);
             debug_log!("[F6] #{sid}: client=({l},{t})~({},{})", l + 90, t + 120);
         }
     }

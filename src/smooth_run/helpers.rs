@@ -30,19 +30,6 @@
 //!   有 buff + toggle=0 → RunL（slot 98）
 //!   有 buff + toggle=1 → RunR（slot 99）
 
-use std::collections::HashSet;
-
-/// 預處理結果統計
-#[allow(dead_code)]
-pub struct VariantInfo {
-    pub walk_sprites: Vec<u16>,
-    pub run_sprites: Vec<u16>,
-    pub run_actions: HashSet<u8>,
-    pub walk_count: usize,
-    pub run_count: usize,
-    pub converted_count: usize,
-}
-
 // ─── 轉換核心 ───
 
 /// 提取括號內完整內容（含方向數+幀數+幀資料）

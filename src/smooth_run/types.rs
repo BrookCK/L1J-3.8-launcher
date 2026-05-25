@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct SpriteFile {
     /// 第一行(精靈總數 header,例如 "300 0 41210")
+    #[cfg(test)]
     pub file_header: String,
     /// 所有 sprite,按出現順序
     pub sprites: Vec<Sprite>,
@@ -19,9 +20,11 @@ pub struct SpriteFile {
 pub struct Sprite {
     pub sid: u16,
     pub header_line_idx: usize,
+    #[cfg(test)]
     pub header_text: String,
     pub img_count: u32,
     pub gfx_id: Option<u32>,
+    #[cfg(test)]
     pub name: String,
     /// 110.framerate 行內容(若有)。由 sprite 內最近一次出現的 110 line 決定。
     pub framerate: Option<String>,
@@ -32,6 +35,7 @@ pub struct Sprite {
 pub struct Action {
     pub line_idx: usize,
     /// 行首縮排("\t" or "  " 等)
+    #[cfg(test)]
     pub indent: String,
     /// 主動作號(如 0/4/11/32/33)
     pub base_action: u32,

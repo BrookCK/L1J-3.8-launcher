@@ -31,10 +31,7 @@ enum JsMessage {
     /// 頁面載入完成，請發送伺服器清單
     Ready,
     /// 使用者點選了某個伺服器（前端自己維護選中狀態，這邊先不用）
-    Select {
-        #[allow(dead_code)]
-        index: usize,
-    },
+    Select {},
     /// 啟動遊戲
     Launch {
         #[serde(rename = "serverIdx")]
@@ -235,6 +232,20 @@ fn exe_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+fn env_truthy(var: &str) -> bool {
+    let Some(raw) = std::env::var_os(var) else {
+        return false;
+    };
+    matches!(
+        raw.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn file_hook_disabled(game_dir: &std::path::Path) -> bool {
+    env_truthy("LOGIN38_DISABLE_FILE_HOOK") || game_dir.join("disable_file_hook.flag").exists()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -342,9 +353,15 @@ fn build_launch_event(
     let base = GAME_EXE.replace(".bin", "");
     let txt_path = dir.join(format!("{base}.txt"));
     let pak_path = dir.join(format!("{base}.pak"));
-    let force_file_hook_from_pak =
-        !aux.transform_file && pak_path.exists() && inject::is_valid_pak(&pak_path);
-    let load_inject_file = aux.transform_file || force_file_hook_from_pak;
+    let file_hook_disabled = file_hook_disabled(&dir);
+    if file_hook_disabled {
+        log_line!("[inject] FileHook disabled by marker/env; transform file skipped");
+    }
+    let force_file_hook_from_pak = !file_hook_disabled
+        && !aux.transform_file
+        && pak_path.exists()
+        && inject::is_valid_pak(&pak_path);
+    let load_inject_file = !file_hook_disabled && (aux.transform_file || force_file_hook_from_pak);
 
     let (inject_buffer, inject_source_path) = if load_inject_file {
         if force_file_hook_from_pak {
@@ -852,7 +869,7 @@ pub fn run_gui() -> Result<()> {
                     }
                 }
             }
-            JsMessage::Select { .. } => {}
+            JsMessage::Select {} => {}
             JsMessage::Launch {
                 server_idx,
                 windowed,

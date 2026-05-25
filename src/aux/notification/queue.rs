@@ -3,7 +3,10 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::types::{FloatKind, LiveFloat, LiveToast, Notification};
+use super::types::{LiveFloat, LiveToast, Notification};
+
+#[cfg(test)]
+use super::types::FloatKind;
 
 pub const TOAST_TTL: Duration = Duration::from_millis(5_000);
 pub const FLOAT_TTL: Duration = Duration::from_millis(1_500);
@@ -57,8 +60,15 @@ impl NotificationQueue {
             .retain(|f| now.duration_since(f.spawned_at) < FLOAT_TTL);
     }
 
-    pub fn toast_count(&self) -> usize { self.toasts.len() }
-    pub fn float_count(&self) -> usize { self.floats.len() }
+    #[cfg(test)]
+    pub fn toast_count(&self) -> usize {
+        self.toasts.len()
+    }
+
+    #[cfg(test)]
+    pub fn float_count(&self) -> usize {
+        self.floats.len()
+    }
 }
 
 #[cfg(test)]
@@ -138,11 +148,17 @@ mod tests {
         let mut q = NotificationQueue::new();
         let now = t0();
         q.push(
-            Notification::FloatingScreen { kind: FloatKind::Exp, amount: 100 },
+            Notification::FloatingScreen {
+                kind: FloatKind::Exp,
+                amount: 100,
+            },
             now,
         );
         q.push(
-            Notification::FloatingScreen { kind: FloatKind::Gold, amount: 50 },
+            Notification::FloatingScreen {
+                kind: FloatKind::Gold,
+                amount: 50,
+            },
             now,
         );
         assert_eq!(q.float_count(), 2);
@@ -154,12 +170,18 @@ mod tests {
         let mut q = NotificationQueue::new();
         let t_a = t0();
         q.push(
-            Notification::FloatingScreen { kind: FloatKind::Exp, amount: 10 },
+            Notification::FloatingScreen {
+                kind: FloatKind::Exp,
+                amount: 10,
+            },
             t_a,
         );
         let t_b = t_a + Duration::from_millis(800);
         q.push(
-            Notification::FloatingScreen { kind: FloatKind::Exp, amount: 20 },
+            Notification::FloatingScreen {
+                kind: FloatKind::Exp,
+                amount: 20,
+            },
             t_b,
         );
         assert_eq!(q.floats[0].amount, 30);

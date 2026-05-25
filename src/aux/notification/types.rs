@@ -35,13 +35,14 @@ pub(super) struct LiveFloat {
 
 /// Render list 一筆(polling 寫,Phase 3 codecave 讀)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub struct RenderEntry {
-    pub kind: u8,         // 0=blit img only, 1=text only
-    pub img_id: u16,      // 0=不畫
+    pub kind: u8,    // 0=blit img only, 1=text only
+    pub img_id: u16, // 0=不畫
     pub x: i16,
     pub y: i16,
-    pub alpha: u8,        // 0~255
-    pub text_ptr: u32,    // 0=不畫
+    pub alpha: u8,     // 0~255
+    pub text_ptr: u32, // 0=不畫
     pub text_color: u32,
     pub font_id: u16,
 }

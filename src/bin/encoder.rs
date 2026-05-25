@@ -551,6 +551,11 @@ pub struct EncoderApp {
                   background_color: Some([255, 255, 255]))]
     cb_exp_drift: nwg::CheckBox,
 
+    #[nwg_control(parent: tab_encode, text: "內掛系統",
+                  position: (15, 315), size: (150, 22),
+                  background_color: Some([255, 255, 255]))]
+    cb_internal_bot: nwg::CheckBox,
+
     #[nwg_control(parent: tab_encode, text: "語系",
                   position: (260, 168), size: (70, 22),
                   background_color: Some([255, 255, 255]))]
@@ -866,6 +871,7 @@ impl EncoderApp {
             dynamic_dialog_enabled: self.is_checked(&self.cb_dynamic_dialog),
             pickup_toast_enabled: self.is_checked(&self.cb_pickup_toast),
             exp_drift_enabled: self.is_checked(&self.cb_exp_drift),
+            internal_bot_enabled: self.is_checked(&self.cb_internal_bot),
             inventory_limit_value: Self::parse_limit_input(
                 &self.inventory_limit_input,
                 DEFAULT_INVENTORY_LIMIT_VALUE,
@@ -901,6 +907,7 @@ impl EncoderApp {
         self.set_checked(&self.cb_dynamic_dialog, a.dynamic_dialog_enabled);
         self.set_checked(&self.cb_pickup_toast, a.pickup_toast_enabled);
         self.set_checked(&self.cb_exp_drift, a.exp_drift_enabled);
+        self.set_checked(&self.cb_internal_bot, a.internal_bot_enabled);
         self.inventory_limit_input
             .set_text(&a.inventory_limit_value.to_string());
         self.img_limit_input

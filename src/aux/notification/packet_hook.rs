@@ -73,10 +73,8 @@ pub const SUB_ID_SHOWDROP: u8 = 192;
 pub const CODECAVE_SIZE: usize = 0x800;
 
 pub const OFF_TAIL: u32 = 0x100;
-pub const OFF_HEAD: u32 = 0x104;
 pub const OFF_TOTAL_HITS: u32 = 0x108;
 pub const OFF_PACKETBOX_HITS: u32 = 0x10C;
-pub const OFF_SUB_ID_TMP: u32 = 0x110;
 pub const OFF_OPCODE_RING: u32 = 0x120;
 pub const OPCODE_RING_LEN: u32 = 16;
 pub const OFF_RING: u32 = 0x200;
@@ -93,7 +91,6 @@ const _ITEMBOARD_PAYLOAD_MAX: usize = 2 + 64 + 1;
 
 pub struct PacketHookHandle {
     pub cave_addr: u32,
-    pub original_bytes: [u8; 6],
     /// Launcher-side consume index(下次要 drain 的 slot index = local_head mod RING_SLOTS)。
     pub local_head: u32,
 }
@@ -184,11 +181,9 @@ pub fn build_shellcode(cave: u32) -> Vec<u8> {
     let push_off = sc.len();
     // 修正兩個 je 的 disp32
     let je1_target = push_off as i32 - (je_itemboard_disp_off as i32 + 4);
-    sc[je_itemboard_disp_off..je_itemboard_disp_off + 4]
-        .copy_from_slice(&je1_target.to_le_bytes());
+    sc[je_itemboard_disp_off..je_itemboard_disp_off + 4].copy_from_slice(&je1_target.to_le_bytes());
     let je2_target = push_off as i32 - (je_showdrop_disp_off as i32 + 4);
-    sc[je_showdrop_disp_off..je_showdrop_disp_off + 4]
-        .copy_from_slice(&je2_target.to_le_bytes());
+    sc[je_showdrop_disp_off..je_showdrop_disp_off + 4].copy_from_slice(&je2_target.to_le_bytes());
 
     // lock inc dword [packetbox_hits]   (7 bytes)
     sc.extend_from_slice(&[0xF0, 0xFF, 0x05]);
@@ -293,23 +288,22 @@ pub fn install(h: HANDLE, pid: u32) -> Result<PacketHookHandle> {
 
     let handle = PacketHookHandle {
         cave_addr: cave,
-        original_bytes: ORIGINAL_BYTES,
         local_head: 0,
     };
     // 存一份在 module-state(供 drain / uninstall 用)
     if let Ok(mut state) = HOOK_STATE.lock() {
         *state = Some(PacketHookHandle {
             cave_addr: cave,
-            original_bytes: ORIGINAL_BYTES,
             local_head: 0,
         });
     }
     Ok(handle)
 }
 
+#[cfg(test)]
 pub fn uninstall(h: HANDLE, pid: u32, handle: &PacketHookHandle) -> Result<()> {
     let mut restore = [0u8; 6];
-    restore.copy_from_slice(&handle.original_bytes);
+    restore.copy_from_slice(&ORIGINAL_BYTES);
     let threads = process::suspend_threads(pid)?;
     let res = memory::write_code(h, HOOK_ADDR, &restore);
     process::resume_threads(threads);
@@ -348,7 +342,9 @@ pub fn read_opcode_ring(h: HANDLE) -> (Vec<u8>, u32) {
         .lock()
         .ok()
         .and_then(|s| s.as_ref().map(|h| h.cave_addr));
-    let Some(cave) = cave_addr else { return (Vec::new(), 0) };
+    let Some(cave) = cave_addr else {
+        return (Vec::new(), 0);
+    };
     let Ok(bytes) = memory::read_bytes(h, cave + OFF_OPCODE_RING, OPCODE_RING_LEN as usize) else {
         return (Vec::new(), 0);
     };
@@ -363,9 +359,10 @@ pub fn read_opcode_ring(h: HANDLE) -> (Vec<u8>, u32) {
 /// **Safety**:跨進程讀,要 ReadProcessMemory。 race 採 lossy 策略 — 如果 game 同個 tick
 /// 連續推超過 16 個,舊的會被覆蓋,我們漏 log 但不 crash。
 pub fn drain(h: HANDLE) -> Vec<Vec<u8>> {
-    let state_opt = HOOK_STATE.lock().ok().and_then(|mut s| {
-        s.as_mut().map(|h| (h.cave_addr, h.local_head))
-    });
+    let state_opt = HOOK_STATE
+        .lock()
+        .ok()
+        .and_then(|mut s| s.as_mut().map(|h| (h.cave_addr, h.local_head)));
     let Some((cave_addr, mut local_head)) = state_opt else {
         return Vec::new();
     };
@@ -493,13 +490,11 @@ mod tests {
         let mut imms = Vec::new();
         for i in 0..sc.len() - 16 {
             if sc[i] == 0x81 && sc[i + 1] == 0xBD {
-                let disp =
-                    i32::from_le_bytes([sc[i + 2], sc[i + 3], sc[i + 4], sc[i + 5]]);
+                let disp = i32::from_le_bytes([sc[i + 2], sc[i + 3], sc[i + 4], sc[i + 5]]);
                 if disp != OPCODE_EBP_OFFSET {
                     continue;
                 }
-                let imm =
-                    u32::from_le_bytes([sc[i + 6], sc[i + 7], sc[i + 8], sc[i + 9]]);
+                let imm = u32::from_le_bytes([sc[i + 6], sc[i + 7], sc[i + 8], sc[i + 9]]);
                 if sc[i + 10] == 0x0F && sc[i + 11] == 0x84 {
                     imms.push(imm);
                 }
@@ -554,9 +549,7 @@ mod tests {
         // 找 8B 0D + addr (mov ecx, [imm32]) 或 FF 05 + addr (inc dword [imm32])
         let mut found = false;
         for i in 0..sc.len() - 5 {
-            if (sc[i] == 0x8B && sc[i + 1] == 0x0D)
-                || (sc[i] == 0xFF && sc[i + 1] == 0x05)
-            {
+            if (sc[i] == 0x8B && sc[i + 1] == 0x0D) || (sc[i] == 0xFF && sc[i + 1] == 0x05) {
                 let a = u32::from_le_bytes([sc[i + 2], sc[i + 3], sc[i + 4], sc[i + 5]]);
                 if a == tail_addr {
                     found = true;
@@ -592,10 +585,7 @@ mod tests {
         for i in 0..sc.len() - 7 {
             if sc[i] == 0xB9 {
                 let cnt = u32::from_le_bytes([sc[i + 1], sc[i + 2], sc[i + 3], sc[i + 4]]);
-                if cnt == SLOT_PAYLOAD_MAX
-                    && sc[i + 5] == 0xF3
-                    && sc[i + 6] == 0xA4
-                {
+                if cnt == SLOT_PAYLOAD_MAX && sc[i + 5] == 0xF3 && sc[i + 6] == 0xA4 {
                     found = true;
                     break;
                 }
@@ -667,10 +657,7 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            synth,
-            vec![SUB_ID_ITEMBOARD, 0x60, 0x07, b'A', b'B', 0]
-        );
+        assert_eq!(synth, vec![SUB_ID_ITEMBOARD, 0x60, 0x07, b'A', b'B', 0]);
     }
 
     #[test]

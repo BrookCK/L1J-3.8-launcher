@@ -255,7 +255,7 @@ pub struct AuxControl {
 impl AuxControl {
     /// 用初始 AuxSettings 建立(會新開 Arc — 注意:跟 LHX window 不同步!)
     /// 推薦改用 [`AuxControl::from_shared`] 共享 Arc。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(initial: AuxSettings) -> Self {
         Self::from_shared(Arc::new(RwLock::new(initial)))
     }
@@ -653,19 +653,29 @@ fn pick_delete_action(
     inv_names: &[String],
 ) -> Option<(&'static str, String)> {
     let safe = |n: &str| -> bool { !n.contains("(使用中)") && !n.contains("(揮舞)") };
+    let find_inventory_match = |needle: &str| -> Option<String> {
+        let needle = crate::aux::lhx_window::strip_qty(needle);
+        inv_names
+            .iter()
+            .find(|n| safe(n) && crate::aux::lhx_window::strip_qty(n) == needle)
+            .cloned()
+    };
     for needle in delete_list {
-        let needle = needle.as_str();
-        if inv_names.iter().any(|n| n == needle && safe(n)) {
-            return Some(("delete", needle.to_string()));
+        if let Some(name) = find_inventory_match(needle) {
+            return Some(("delete", name));
         }
     }
     for needle in dissolve_list {
-        let needle = needle.as_str();
-        if inv_names.iter().any(|n| n == needle && safe(n)) {
-            return Some(("dissolve", needle.to_string()));
+        if let Some(name) = find_inventory_match(needle) {
+            return Some(("dissolve", name));
         }
     }
     None
+}
+
+fn is_dissolve_solvent_name(name: &str) -> bool {
+    let name = crate::aux::lhx_window::strip_qty(name);
+    name.starts_with("溶解劑") || name.starts_with("溶解剂")
 }
 
 /// timer_delete 刪物 tick — 獨立 thread 跑(不寄生 timer_2)。
@@ -732,10 +742,10 @@ fn delete_tick(
         "dissolve" => {
             let solvent = items
                 .iter()
-                .find(|it| it.name_lossy().starts_with("溶解劑"));
+                .find(|it| is_dissolve_solvent_name(&it.name_lossy()));
             let Some(sv) = solvent else {
                 log_line!(
-                    "[delete] 想溶解「{}」但背包沒「溶解劑」",
+                    "[delete] 想溶解「{}」但背包沒「溶解劑/溶解剂」",
                     target.name_lossy()
                 );
                 return;
@@ -959,6 +969,29 @@ fn ensure_spell_book_ready(
     crate::aux::spell_book::ensure_fresh(h, spell_book, tag)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoDrinkItemRequest {
+    DirectUsePacket { item_param: u32 },
+}
+
+fn auto_drink_item_request(item: &crate::aux::inventory::Item) -> AutoDrinkItemRequest {
+    AutoDrinkItemRequest::DirectUsePacket {
+        item_param: item.item_param,
+    }
+}
+
+fn execute_auto_drink_item(
+    dh: &crate::aux::drink_hook::DrinkHandle,
+    h: HANDLE,
+    item: &crate::aux::inventory::Item,
+) -> anyhow::Result<()> {
+    match auto_drink_item_request(item) {
+        AutoDrinkItemRequest::DirectUsePacket { item_param } => {
+            dh.execute_use_item_packet(h, item_param)
+        }
+    }
+}
+
 /// timer_2 喝水 tick — 檢查 7 個 row,符合條件 + 對應藥水在背包就 queue。
 ///
 /// 目前只實作 row[0](HP threshold);其他 row + MP/safe-MP 後續補。
@@ -1017,6 +1050,7 @@ fn drink_tick(
         // 解析 row 字串(剝掉 /M /ME 等 suffix,或留為一般物品)
         let bi = crate::aux::lhx_window::parse_buff_item(&row.item);
 
+        // A row-local failure should not block later rows or mp_when_safe below.
         match bi.item_type {
             // 物品:走原本 USE_ITEM 路徑
             'I' => {
@@ -1024,7 +1058,7 @@ fn drink_tick(
                     Ok(v) => v,
                     Err(e) => {
                         log_line!("[drink] 讀背包失敗(可能剛進場 inventory 還沒 ready): {e:#}");
-                        return;
+                        continue;
                     }
                 };
                 if items.is_empty() {
@@ -1032,7 +1066,7 @@ fn drink_tick(
                         "[drink] HP 觸發但背包是空的(item 數=0,inventory pointer 可能失效或 server 還沒下發)。row={:?}",
                         row.item
                     );
-                    return;
+                    continue;
                 }
                 let needle = crate::aux::lhx_window::strip_qty(&bi.name);
                 let it = match items
@@ -1046,7 +1080,7 @@ fn drink_tick(
                             needle,
                             items.len()
                         );
-                        return;
+                        continue;
                     }
                 };
                 if s.potion_use_percent {
@@ -1067,7 +1101,7 @@ fn drink_tick(
                     );
                 }
                 let t0 = std::time::Instant::now();
-                match dh.execute_drink(h, it.entry_addr) {
+                match execute_auto_drink_item(&dh, h, it) {
                     Ok(()) => log_line!("[drink] execute OK,耗時 {} ms", t0.elapsed().as_millis()),
                     Err(e) => log_line!("[drink] execute 失敗: {e:#}"),
                 }
@@ -1075,7 +1109,7 @@ fn drink_tick(
             // 技能:走 spell_book + execute_skill — 對齊 fire_status_action 的 'S' 分支
             'S' => {
                 if !ensure_spell_book_ready(h, spell_book, "drink") {
-                    return;
+                    continue;
                 }
                 let packed = match spell_book.read().as_ref().and_then(|b| b.lookup(&bi.name)) {
                     Some(p) => p,
@@ -1084,7 +1118,7 @@ fn drink_tick(
                             "[drink] HP 觸發但技能「{}」未學會(spell_book 沒這個),skip",
                             bi.name
                         );
-                        return;
+                        continue;
                     }
                 };
                 let mode = match &bi.cast_target {
@@ -1100,7 +1134,7 @@ fn drink_tick(
                             bi.name,
                             other
                         );
-                        return;
+                        continue;
                     }
                 };
                 if s.potion_use_percent {
@@ -1133,11 +1167,9 @@ fn drink_tick(
                     row.item,
                     other
                 );
-                return;
+                continue;
             }
         }
-        // 一個 tick 只 queue 一個 row,後面 row 等下次再說
-        return;
     }
 
     if !mp_when_safe_triggered(&s, &state) {
@@ -1179,7 +1211,7 @@ fn drink_tick(
                 state.max_mp,
                 it.name_lossy()
             );
-            if let Err(e) = dh.execute_drink(h, it.entry_addr) {
+            if let Err(e) = execute_auto_drink_item(&dh, h, it) {
                 log_line!("[drink/mp-safe] execute item failed: {e:#}");
             }
         }
@@ -1937,6 +1969,96 @@ mod tests {
     }
 
     #[test]
+    fn auto_drink_item_request_uses_packet_param_not_client_entry() {
+        let item = crate::aux::inventory::Item {
+            entry_addr: 0x1111_1111,
+            item_param: 0x2222_2222,
+            item_type: 0,
+            icon: 0,
+            equipped: false,
+            count: 1,
+            name_raw: b"red potion".to_vec(),
+        };
+
+        assert_eq!(
+            auto_drink_item_request(&item),
+            AutoDrinkItemRequest::DirectUsePacket {
+                item_param: 0x2222_2222
+            }
+        );
+    }
+
+    #[test]
+    fn auto_drink_item_execution_uses_uncooldowned_packet_path() {
+        let source = include_str!("runtime.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let execute_fn = production
+            .split("fn execute_auto_drink_item(")
+            .nth(1)
+            .expect("execute_auto_drink_item exists")
+            .split("/// timer_2")
+            .next()
+            .expect("execute_auto_drink_item body is bounded by drink_tick docs");
+
+        assert!(
+            execute_fn.contains("execute_use_item_packet"),
+            "auto-drink item rows must use the packet path without DrinkHandle's global drink cooldown"
+        );
+        assert!(
+            !execute_fn.contains("execute_drink_packet"),
+            "auto-drink item rows must not use the global drink cooldown path"
+        );
+    }
+
+    #[test]
+    fn drink_tick_potion_rows_are_not_limited_to_first_triggered_row() {
+        let source = include_str!("runtime.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let drink_tick = production
+            .split("fn drink_tick(")
+            .nth(1)
+            .expect("drink_tick exists");
+        let row_loop = drink_tick
+            .find("for row in s.potion_rows.iter()")
+            .expect("potion row loop exists");
+        let mp_check = drink_tick
+            .find("if !mp_when_safe_triggered(&s, &state)")
+            .expect("mp_when_safe check exists");
+        let row_body = &drink_tick[row_loop..mp_check];
+
+        assert!(
+            !row_body.contains("One potion row per tick"),
+            "drink_tick must evaluate every enabled triggered potion row, not stop after the first"
+        );
+        assert!(
+            !row_body.contains("then still allow mp_when_safe"),
+            "drink_tick must not keep a single-row limiter before mp_when_safe"
+        );
+    }
+
+    #[test]
+    fn drink_tick_potion_row_failures_do_not_return_before_mp_when_safe() {
+        let source = include_str!("runtime.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let drink_tick = production
+            .split("fn drink_tick(")
+            .nth(1)
+            .expect("drink_tick exists");
+        let row_loop = drink_tick
+            .find("for row in s.potion_rows.iter()")
+            .expect("potion row loop exists");
+        let mp_check = drink_tick
+            .find("if !mp_when_safe_triggered(&s, &state)")
+            .expect("mp_when_safe check exists");
+        let row_body = &drink_tick[row_loop..mp_check];
+
+        assert!(
+            !row_body.contains("return;"),
+            "a triggered potion row failure must not return before mp_when_safe; keep later drink work reachable"
+        );
+    }
+
+    #[test]
     fn misc_toggles_default_all_false() {
         let m = MiscToggles::default();
         assert!(!m.all_day);
@@ -2037,12 +2159,29 @@ mod tests {
     }
 
     #[test]
+    fn delete_tick_matches_stack_item_after_quantity_suffix_changes() {
+        let delete_list = vec!["肉 (191)".to_string()];
+        let dissolve_list: Vec<String> = vec![];
+        let inv = vec!["肉 (190)".to_string()];
+        let pick = pick_delete_action(&delete_list, &dissolve_list, &inv);
+        assert_eq!(pick, Some(("delete", "肉 (190)".to_string())));
+    }
+
+    #[test]
     fn delete_tick_falls_back_to_dissolve_when_delete_list_empty() {
         let delete_list: Vec<String> = vec![];
         let dissolve_list = vec!["+0 鋼刀".to_string()];
         let inv = vec!["破布".to_string(), "+0 鋼刀".to_string()];
         let pick = pick_delete_action(&delete_list, &dissolve_list, &inv);
         assert_eq!(pick, Some(("dissolve", "+0 鋼刀".to_string())));
+    }
+
+    #[test]
+    fn dissolve_solvent_name_accepts_traditional_and_simplified_names() {
+        assert!(is_dissolve_solvent_name("溶解劑"));
+        assert!(is_dissolve_solvent_name("溶解剂"));
+        assert!(is_dissolve_solvent_name("溶解剂 (3)"));
+        assert!(!is_dissolve_solvent_name("骰子匕首"));
     }
 
     #[test]

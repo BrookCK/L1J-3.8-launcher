@@ -19,18 +19,18 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, S
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
     ExtTextOutW, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
-    AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DIB_RGB_COLORS, ETO_OPTIONS, HBITMAP, HDC, HFONT,
-    HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetClientRect, PeekMessageW,
-    PostQuitMessage, RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage,
-    UpdateLayeredWindow, CW_USEDEFAULT, HCURSOR, HICON, HWND_TOPMOST, MSG, PM_REMOVE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY,
-    WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetForegroundWindow,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PeekMessageW, PostQuitMessage,
+    RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
+    CW_USEDEFAULT, HCURSOR, HICON, HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY, WM_QUIT, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::logger::log_line;
@@ -43,7 +43,6 @@ use super::types::{with_commas, FloatKind};
 pub struct Snapshot {
     pub toasts: Vec<ToastView>,
     pub floats: Vec<FloatView>,
-    pub captured_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -64,14 +63,12 @@ pub struct FloatView {
 static SNAPSHOT: Lazy<Mutex<Snapshot>> = Lazy::new(|| Mutex::new(Snapshot::default()));
 static OVERLAY_RUNNING: AtomicBool = AtomicBool::new(false);
 
-const GAME_WINDOW_TITLE: &str = "Lineage Windows Client (13081901)";
-
 /// CreateWindowExW 初始大小,UpdateLayeredWindow 後會被 game_rect 尺寸覆寫,純佔位。
 const INITIAL_W: i32 = 800;
 const INITIAL_H: i32 = 600;
 
 const TOAST_W: i32 = 329; // 1889.png 寬度
-const TOAST_H: i32 = 37;  // 1889.png 高度,1888 道具框剛好 37x37
+const TOAST_H: i32 = 37; // 1889.png 高度,1888 道具框剛好 37x37
 const TOAST_GAP: i32 = 2;
 const TOAST_LIFE_MS: u32 = 5000;
 
@@ -101,7 +98,12 @@ impl IconCache {
             exp.as_ref().map(|p| (p.width, p.height)),
             gold.as_ref().map(|p| (p.width, p.height)),
         );
-        Self { frame, bar, exp, gold }
+        Self {
+            frame,
+            bar,
+            exp,
+            gold,
+        }
     }
 }
 
@@ -138,6 +140,7 @@ fn run_thread() -> Result<()> {
     // 初始尺寸是佔位 — 第一個 tick 偵測到 game_rect 才會 recreate 成正確大小
     let mut gdi = GdiState::new(INITIAL_W, INITIAL_H, icons.clone())?;
     let mut next_render = Instant::now();
+    let mut overlay_visible = false;
 
     loop {
         let mut msg = MSG::default();
@@ -155,28 +158,39 @@ fn run_thread() -> Result<()> {
         if now >= next_render {
             next_render = now + Duration::from_millis(30);
 
-            if let Some(game) = find_game_window() {
-                if let Some(r) = client_rect_screen(game) {
-                    let want_w = (r.right - r.left).max(1);
-                    let want_h = (r.bottom - r.top).max(1);
-                    if gdi.width != want_w || gdi.height != want_h {
-                        match GdiState::new(want_w, want_h, icons.clone()) {
-                            Ok(new_gdi) => {
-                                log_line!(
-                                    "[overlay] resize {}x{} -> {}x{}",
-                                    gdi.width, gdi.height, want_w, want_h
-                                );
-                                gdi = new_gdi;
-                            }
-                            Err(e) => {
-                                log_line!("[overlay] resize {want_w}x{want_h} 失敗: {e:#}");
-                            }
+            let target_rect = find_game_window()
+                .and_then(|game_hwnd| overlay_target_rect(game_hwnd).map(|r| (game_hwnd, r)));
+            if let Some((game_hwnd, r)) = target_rect {
+                let want_w = (r.right - r.left).max(1);
+                let want_h = (r.bottom - r.top).max(1);
+                if gdi.width != want_w || gdi.height != want_h {
+                    match GdiState::new(want_w, want_h, icons.clone()) {
+                        Ok(new_gdi) => {
+                            log_line!(
+                                "[overlay] resize {}x{} -> {}x{} hwnd=0x{:08X} rect=({}, {})-({}, {})",
+                                gdi.width,
+                                gdi.height,
+                                want_w,
+                                want_h,
+                                game_hwnd.0 as usize as u32,
+                                r.left,
+                                r.top,
+                                r.right,
+                                r.bottom
+                            );
+                            gdi = new_gdi;
+                        }
+                        Err(e) => {
+                            log_line!("[overlay] resize {want_w}x{want_h} 失敗: {e:#}");
                         }
                     }
-                    let snap = SNAPSHOT.lock().ok().map(|s| s.clone()).unwrap_or_default();
-                    render(&mut gdi, &snap);
-                    update_layered(hwnd, &gdi, &r);
                 }
+                let snap = SNAPSHOT.lock().ok().map(|s| s.clone()).unwrap_or_default();
+                render(&mut gdi, &snap);
+                update_layered(hwnd, &gdi, &r);
+                overlay_visible = true;
+            } else {
+                set_overlay_visible(hwnd, &mut overlay_visible, false);
             }
         }
 
@@ -185,21 +199,80 @@ fn run_thread() -> Result<()> {
 }
 
 fn find_game_window() -> Option<HWND> {
-    let title_w: Vec<u16> = GAME_WINDOW_TITLE.encode_utf16().chain(std::iter::once(0)).collect();
-    let hwnd = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title_w.as_ptr())) }.ok()?;
-    if hwnd.0.is_null() {
-        None
-    } else {
-        Some(hwnd)
+    // 多開安全:走 game_window cache。 cache miss fallback 老 FindWindowW(早期 boot 不破)。
+    crate::aux::game_window::cached_or_find_game_hwnd()
+}
+
+fn overlay_target_rect(hwnd: HWND) -> Option<RECT> {
+    let state = overlay_display_state(hwnd);
+    overlay_target_rect_for_display_state(state, client_rect_screen(hwnd))
+}
+
+#[derive(Clone, Copy)]
+struct OverlayDisplayState {
+    visible: bool,
+    minimized: bool,
+    foreground: bool,
+}
+
+fn overlay_display_state(hwnd: HWND) -> OverlayDisplayState {
+    OverlayDisplayState {
+        visible: unsafe { IsWindowVisible(hwnd).as_bool() },
+        minimized: unsafe { IsIconic(hwnd).as_bool() },
+        foreground: game_window_is_foreground(hwnd),
     }
+}
+
+fn game_window_is_foreground(hwnd: HWND) -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() {
+        return false;
+    }
+
+    let mut game_pid = 0u32;
+    let mut fg_pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut game_pid));
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+    }
+    game_pid != 0 && game_pid == fg_pid
+}
+
+fn overlay_target_rect_for_display_state(
+    state: OverlayDisplayState,
+    rect: Option<RECT>,
+) -> Option<RECT> {
+    if state.visible && !state.minimized && state.foreground {
+        rect
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+fn overlay_target_rect_for_state(game_minimized: bool, rect: Option<RECT>) -> Option<RECT> {
+    overlay_target_rect_for_display_state(
+        OverlayDisplayState {
+            visible: true,
+            minimized: game_minimized,
+            foreground: true,
+        },
+        rect,
+    )
 }
 
 fn client_rect_screen(hwnd: HWND) -> Option<RECT> {
     let mut rc = RECT::default();
     unsafe {
         GetClientRect(hwnd, &mut rc).ok()?;
-        let mut tl = POINT { x: rc.left, y: rc.top };
-        let mut br = POINT { x: rc.right, y: rc.bottom };
+        let mut tl = POINT {
+            x: rc.left,
+            y: rc.top,
+        };
+        let mut br = POINT {
+            x: rc.right,
+            y: rc.bottom,
+        };
         if !ClientToScreen(hwnd, &mut tl).as_bool() || !ClientToScreen(hwnd, &mut br).as_bool() {
             return None;
         }
@@ -210,6 +283,18 @@ fn client_rect_screen(hwnd: HWND) -> Option<RECT> {
             bottom: br.y,
         })
     }
+}
+
+fn set_overlay_visible(hwnd: HWND, current: &mut bool, next: bool) {
+    if *current == next {
+        return;
+    }
+
+    unsafe {
+        let cmd = if next { SW_SHOWNOACTIVATE } else { SW_HIDE };
+        let _ = ShowWindow(hwnd, cmd);
+    }
+    *current = next;
 }
 
 fn create_window() -> Result<HWND> {
@@ -244,7 +329,6 @@ fn create_window() -> Result<HWND> {
             Some(hinstance.into()),
             None,
         )?;
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         Ok(hwnd)
     }
 }
@@ -690,5 +774,37 @@ fn update_layered(hwnd: HWND, gdi: &GdiState, game_rect: &RECT) {
             0,
             SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect() -> RECT {
+        RECT {
+            left: 10,
+            top: 20,
+            right: 810,
+            bottom: 620,
+        }
+    }
+
+    #[test]
+    fn minimized_game_window_has_no_overlay_target_rect() {
+        assert!(overlay_target_rect_for_state(true, Some(rect())).is_none());
+    }
+
+    #[test]
+    fn background_game_window_has_no_overlay_target_rect() {
+        assert!(overlay_target_rect_for_display_state(
+            OverlayDisplayState {
+                visible: true,
+                minimized: false,
+                foreground: false,
+            },
+            Some(rect())
+        )
+        .is_none());
     }
 }

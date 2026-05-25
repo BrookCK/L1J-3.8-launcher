@@ -3,9 +3,7 @@
 //! `process_variant_lines_pipeline(text)` 等價於 legacy 的
 //! `process_variant_lines(text)`,輸出 byte-equal。
 
-use super::helpers::VariantInfo;
-
-pub fn process_variant_lines_pipeline(text: &str) -> (String, VariantInfo) {
+pub fn process_variant_lines_pipeline(text: &str) -> String {
     let sf = super::parse::parse(text);
     let roles = super::classify::classify(&sf);
     let runs = super::extract::extract(&sf, &roles);

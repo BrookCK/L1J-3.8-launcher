@@ -16,6 +16,7 @@ const INLINE_SCAN_ACTIONS: &[u32] = &[
 pub fn parse(text: &str) -> SpriteFile {
     let ends_with_newline = text.ends_with('\n');
     let raw_lines: Vec<String> = text.split('\n').map(String::from).collect();
+    #[cfg(test)]
     let file_header = raw_lines.first().cloned().unwrap_or_default();
     let mut sprites: Vec<Sprite> = Vec::new();
     // 對應 legacy `cur_framerate` — sprite-scoped,進入新 sprite 時 reset。
@@ -26,15 +27,22 @@ pub fn parse(text: &str) -> SpriteFile {
 
         if trimmed.starts_with('#') {
             if let Some(sid) = parse_sprite_id(trimmed) {
+                #[cfg(test)]
                 let (img_count, gfx_id, name) = parse_header_ext(trimmed)
                     .map(|(ic, gid, n)| (ic, gid, n.to_string()))
                     .unwrap_or((0, None, String::new()));
+                #[cfg(not(test))]
+                let (img_count, gfx_id) = parse_header_ext(trimmed)
+                    .map(|(ic, gid, _)| (ic, gid))
+                    .unwrap_or((0, None));
                 let mut sprite = Sprite {
                     sid,
                     header_line_idx: idx,
+                    #[cfg(test)]
                     header_text: line.clone(),
                     img_count,
                     gfx_id,
+                    #[cfg(test)]
                     name,
                     framerate: None,
                     actions: Vec::new(),
@@ -108,6 +116,7 @@ pub fn parse(text: &str) -> SpriteFile {
     }
 
     SpriteFile {
+        #[cfg(test)]
         file_header,
         sprites,
         raw_lines,
@@ -129,6 +138,7 @@ fn build_inline_action(
     let first_spr = first_spr_from_content(content).unwrap_or(0);
     Some(Action {
         line_idx,
+        #[cfg(test)]
         indent: String::new(),
         base_action,
         dash_variant: None,
@@ -150,6 +160,8 @@ fn build_action(
     trimmed: &str,
     cur_framerate: &Option<String>,
 ) -> Option<Action> {
+    #[cfg(not(test))]
+    let _ = indent;
     let content = extract_frame_content(full_line).to_string();
     if content.is_empty() {
         return None;
@@ -166,6 +178,7 @@ fn build_action(
     let _ = extract_frame_count(&content);
     Some(Action {
         line_idx,
+        #[cfg(test)]
         indent: indent.to_string(),
         base_action,
         dash_variant,

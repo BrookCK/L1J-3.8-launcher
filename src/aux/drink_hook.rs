@@ -52,6 +52,16 @@ const SHELLCODE_SIZE: usize = 128;
 /// 因為 `[magic_info+8]` 為 0 通不過 ready check,封包不會送出。
 const TARGET_ID_ADDR: u32 = 0x0097C910;
 
+/// 攻擊技能 target_id global — 對齊 `cccdhh` 攻擊路徑 0x73CBC0 讀取的位址。
+///
+/// 2026-05-13 RE:3.8 spell_book_cast 內部有兩條 send path,**用不同 global**:
+/// - `[0x97C90C]`(本常數)→ 攻擊技能(`cccdhh`,11-byte packet,含 target XY)
+/// - `[0x97C910]`(`TARGET_ID_ADDR`)→ 物品 / 自身技能(`cccd`,7-byte packet)
+///
+/// 對怪施放攻擊技能必須寫這個 — 寫 0x97C910 的結果是 dispatcher 走「物品 target」
+/// 路徑,看 entity 不在 inventory 就跳「請選擇目標」對話框。
+const ATTACK_TARGET_ID_ADDR: u32 = 0x0097C90C;
+
 /// 玩家自己的 char_id (`[0xABF4B4]`,進場後填入,跨重啟值不變但 attach 後讀才知道)。
 ///
 /// 為什麼需要:`/ME` 後綴(指定 target = 自己)的施放路徑必須在 cast_magic dispatcher
@@ -69,12 +79,14 @@ pub enum SkillTargetMode {
     /// `/ME` — 指定自己,強制 `[0x97C910] = [SELF_CHAR_ID_ADDR]`(自己 char_id)
     /// 走 spell_book_cast 路徑。對「純自身 buff」(加速術/火焰武器/保護罩等)有效,
     /// 因為 spell_book_cast 內部對純自身 buff 強制 target=self,我們寫 [0x97C910] 沒影響。
+    #[cfg(test)]
     SelfCast,
     /// `/M` — 不指定 target,完全不動 `[0x97C910]`,讓 dispatcher 用當下值
     /// 注意:3.8 dispatcher 仍會讀 `[0x97C910]`,若殘留 garbage 會被 server ERROR;
     /// 自身 buff 建議用 `/ME` 顯式指定自己,避開此問題
     NoSpec,
     /// `/M=name` `/M?name` `/M??name` — 指定 char_id(已從 entity list 解析出)
+    #[cfg(test)]
     Explicit(u32),
     /// **bypass spell_book_cast,直接組 C_SKILL packet 送 SendPacketData,target=self_char_id**。
     /// 用於「可指定他人的輔助 buff」(體魄強健術 / 通暢氣脈術 等)— 這類 spell_book_cast
@@ -91,6 +103,29 @@ pub enum SkillTargetMode {
     /// 直接送 packet 跳過 client 端 entity lookup,opcode 6 "cccd" 結構讓 server
     /// 收到後在 inventory namespace 找到該 obj 完成施法。
     ForceTargetPacket(u32),
+    /// **bypass spell_book_cast,直接組 C_SKILL packet 的 `cccdhh` 變體,target = 世界 entity**。
+    ///
+    /// 2026-05-13 RE 確認:遊戲對「世界怪物」的攻擊技能 send path(0x73CC60..0x73CCB6)用的是
+    /// `cccdhh` 格式 — 比 `cccd` 多 (target_x:h, target_y:h) 兩個座標。 純 `cccd` 是「對 inventory
+    /// 物品施法」(無座標)。 對怪物丟 `cccd` server 視同範圍外 → 完全沒反應(已 live test 驗)。
+    ///
+    /// 參數:
+    /// - `target_id`:怪物的 entity_id(`+0x0C`)
+    /// - `target_x`:怪物**解碼後**的 display X(用 `((raw-0x8000)>>1)+0x8000`,raw 從 `+0x34`)
+    /// - `target_y`:怪物 `+0x38` Y(直讀,無解碼)
+    #[cfg(test)]
+    ForceTargetPacketWithXY {
+        target_id: u32,
+        target_x: u32,
+        target_y: u32,
+    },
+    /// **對怪施放攻擊技能** — 寫 `[0x97C90C] = target_id` 然後 call `spell_book_cast`。
+    ///
+    /// 2026-05-13 RE 結果:3.8 攻擊技能走 `cccdhh` 路徑(0x73CBC0),讀 `[0x97C90C]` 拿
+    /// target_id;`Explicit` 寫 `[0x97C910]` 是物品/自身路徑用,對怪會跳「請選擇目標」
+    /// 對話框。 本 mode 寫對的 global,讓 dispatcher 走攻擊路徑、客戶端跑完動畫 + 冷卻
+    /// 追蹤,送出跟玩家手動點怪一模一樣的 packet。
+    AttackEntity(u32),
 }
 
 /// DrinkHandle — 不需要遊戲 HANDLE 即可建立。
@@ -116,13 +151,27 @@ impl DrinkHandle {
     }
 
     /// 取得 USE_ITEM 位址（給 log 用）
+    #[cfg(test)]
     pub fn use_item_addr(&self) -> u32 {
         self.use_item_addr
     }
 
     /// 一次性執行喝水(HP 補水路徑) — 走內建 500ms cooldown,避免 HP 還沒回升就連噴。
+    #[cfg(test)]
     pub fn execute_drink(&self, h: HANDLE, item_entry: u32) -> Result<()> {
         self.execute_internal(h, item_entry, true)
+    }
+
+    /// Auto-potion packet path: keep the drink cooldown, but do not enter the
+    /// client-side USE_ITEM wrapper that competes with game hotkeys/inventory.
+    #[cfg(test)]
+    pub fn execute_drink_packet(&self, h: HANDLE, item_param: u32) -> Result<()> {
+        self.apply_drink_cooldown()?;
+        let Some(opcode) = address::C_USE_ITEM else {
+            bail!("C_USE_ITEM opcode is not configured");
+        };
+        let sc = build_use_item_packet_shellcode(opcode, item_param);
+        self.run_remote_call(h, &sc, "drink_packet")
     }
 
     /// 直接刪除物品 — 走 C_DELETE_ITEM packet 而非 client UI 路徑。
@@ -206,10 +255,47 @@ impl DrinkHandle {
         self.execute_internal(h, item_entry, false)
     }
 
+    /// Direct C_USE_ITEM packet path for items that must not depend on the
+    /// client-side USE_ITEM wrapper running in a remote thread.
+    pub fn execute_use_item_packet(&self, h: HANDLE, item_param: u32) -> Result<()> {
+        let Some(opcode) = address::C_USE_ITEM else {
+            bail!("C_USE_ITEM opcode is not configured");
+        };
+        let sc = build_use_item_packet_shellcode(opcode, item_param);
+        self.run_remote_call(h, &sc, "use_item_packet")
+    }
+
+    /// Direct C_USE_ITEM packet path for teleport scrolls.
+    ///
+    /// L1J 3.80 `C_ItemUSe` reads teleport scrolls as
+    /// `objectId:d, bookmark_map:h, bookmark_id:d`. Sending zero bookmark data
+    /// makes the server fall back to random teleport.
+    pub fn execute_teleport_scroll_packet(&self, h: HANDLE, item_param: u32) -> Result<()> {
+        let Some(opcode) = address::C_USE_ITEM else {
+            bail!("C_USE_ITEM opcode is not configured");
+        };
+        let sc = build_teleport_scroll_packet_shellcode(opcode, item_param, 4, 0, 0);
+        self.run_remote_call(h, &sc, "teleport_scroll_packet")?;
+        std::thread::sleep(Duration::from_millis(250));
+        self.execute_teleport_ack_packet(h)
+    }
+
+    /// Complete a pending server-side teleport.
+    ///
+    /// Some L1J 3.80 servers send `S_Teleport` after scroll use and wait for the
+    /// client to answer with payload-less `C_Teleport` before applying the move.
+    pub fn execute_teleport_ack_packet(&self, h: HANDLE) -> Result<()> {
+        let Some(opcode) = address::C_TELEPORT else {
+            bail!("C_TELEPORT opcode is not configured");
+        };
+        let sc = build_opcode_only_packet_shellcode(opcode);
+        self.run_remote_call(h, &sc, "teleport_ack_packet")
+    }
+
     /// 送 chat packet — 喊話 / 一般訊息 / dialog reply 通用入口。
     ///
     /// `channel` 取自 [`crate::aux::address::CHAT_CHANNEL_SHOUT`] 等常數;`message`
-    /// 是 UTF-8 String,shellcode 內會 Big5 編碼後內嵌。
+    /// 是 UTF-8 String,shellcode 內會依目前 launcher 文字編碼模式轉成 Big5/GBK 後內嵌。
     ///
     /// **不走** DrinkHandle 內建 cooldown — caller(shout_tick)自己用 interval 控制節奏。
     pub fn execute_chat(&self, h: HANDLE, channel: u8, message: &str) -> Result<()> {
@@ -244,19 +330,30 @@ impl DrinkHandle {
         self.run_remote_call(h, &sc, "skill")
     }
 
+    /// 送 C_ATTACK ([`C_ATTACK_OPCODE`] = 229) 或 C_FAR_ATTACK ([`C_FAR_ATTACK_OPCODE`] = 123)
+    /// raw packet — 物理攻擊路徑,完全 bypass spell_book / 客戶端動畫。
+    ///
+    /// `target_x` / `target_y`:server 端忽略(用 server 自己的玩家位置),caller 可填 0
+    /// 或當前玩家 display X/Y 都可。 為了 packet trace 可讀性建議填實際值。
+    ///
+    /// **不走** DrinkHandle 內建 cooldown — caller(hunt tick)自己用 attack_cooldown_ms 節流。
+    #[cfg(test)]
+    pub fn execute_attack_packet(
+        &self,
+        h: HANDLE,
+        opcode: u8,
+        target_id: u32,
+        target_x: u32,
+        target_y: u32,
+    ) -> Result<()> {
+        let sc = build_attack_packet_shellcode(opcode, target_id, target_x, target_y);
+        self.run_remote_call(h, &sc, "attack")
+    }
+
     fn execute_internal(&self, h: HANDLE, item_entry: u32, respect_cooldown: bool) -> Result<()> {
         // 1. cooldown check（Rust 端 Instant，不靠遊戲 tick）
         if respect_cooldown {
-            let mut last = self.last_drink.lock().unwrap();
-            if let Some(t) = *last {
-                if t.elapsed() < DRINK_COOLDOWN {
-                    bail!(
-                        "still cooling down ({}ms left)",
-                        (DRINK_COOLDOWN - t.elapsed()).as_millis()
-                    );
-                }
-            }
-            *last = Some(Instant::now());
+            self.apply_drink_cooldown()?;
         }
 
         // 1b. 讀取 USE_ITEM 函數前 16 bytes,跟首次 snapshot 比對
@@ -311,6 +408,20 @@ impl DrinkHandle {
 
         // 3-7. 共用 alloc/write/thread/wait/free
         self.run_remote_call(h, &sc, "drink")
+    }
+
+    fn apply_drink_cooldown(&self) -> Result<()> {
+        let mut last = self.last_drink.lock().unwrap();
+        if let Some(t) = *last {
+            if t.elapsed() < DRINK_COOLDOWN {
+                bail!(
+                    "still cooling down ({}ms left)",
+                    (DRINK_COOLDOWN - t.elapsed()).as_millis()
+                );
+            }
+        }
+        *last = Some(Instant::now());
+        Ok(())
     }
 
     /// 跑一段 shellcode(VirtualAllocEx → WriteProcessMemory → CreateRemoteThread →
@@ -434,6 +545,23 @@ fn build_skill_shellcode(packed_skill_id: u32, target_mode: SkillTargetMode) -> 
     if let SkillTargetMode::ForceTargetPacket(target_id) = target_mode {
         return build_force_target_packet_shellcode(packed_skill_id, target_id);
     }
+    #[cfg(test)]
+    if let SkillTargetMode::ForceTargetPacketWithXY {
+        target_id,
+        target_x,
+        target_y,
+    } = target_mode
+    {
+        return build_force_target_packet_xy_shellcode(
+            packed_skill_id,
+            target_id,
+            target_x,
+            target_y,
+        );
+    }
+    if let SkillTargetMode::AttackEntity(target_id) = target_mode {
+        return build_attack_entity_shellcode(packed_skill_id, target_id);
+    }
 
     let mut sc = Vec::with_capacity(48);
     // pushad
@@ -446,6 +574,7 @@ fn build_skill_shellcode(packed_skill_id: u32, target_mode: SkillTargetMode) -> 
 
     // ── target setup 區段(mode 相依) ─────────────────────────
     match target_mode {
+        #[cfg(test)]
         SkillTargetMode::SelfCast => {
             // mov eax, [SELF_CHAR_ID_ADDR]; mov [TARGET], eax
             sc.push(0xA1);
@@ -456,6 +585,7 @@ fn build_skill_shellcode(packed_skill_id: u32, target_mode: SkillTargetMode) -> 
         SkillTargetMode::NoSpec => {
             // 不動 [TARGET] — 由 dispatcher 用當下狀態(玩家鼠標 hover)
         }
+        #[cfg(test)]
         SkillTargetMode::Explicit(id) => {
             // mov dword [TARGET], imm32
             sc.extend_from_slice(&[0xC7, 0x05]);
@@ -464,6 +594,9 @@ fn build_skill_shellcode(packed_skill_id: u32, target_mode: SkillTargetMode) -> 
         }
         SkillTargetMode::ForceSelfPacket => unreachable!("已在函數開頭分流"),
         SkillTargetMode::ForceTargetPacket(_) => unreachable!("已在函數開頭分流"),
+        #[cfg(test)]
+        SkillTargetMode::ForceTargetPacketWithXY { .. } => unreachable!("已在函數開頭分流"),
+        SkillTargetMode::AttackEntity(_) => unreachable!("已在函數開頭分流"),
     }
 
     // ── 共通呼叫段 ───────────────────────────────────────
@@ -496,8 +629,33 @@ fn build_skill_shellcode(packed_skill_id: u32, target_mode: SkillTargetMode) -> 
 ///   [opcode:c][skill_high:c][skill_low:c][target:d]
 const FMT_CCCD_ADDR: u32 = 0x008EF028;
 
+/// 「cccdhh」格式字串位址(executable .rdata)— 0x73CCAC push 引用點。
+/// 2026-05-13 RE @0x73CC60..0x73CCB6 確認:對「世界怪物」施放攻擊技能的真實 send path 用此格式。
+/// SendPacketData 組 11-byte C_SKILL packet:
+///   [opcode:c=6][skill_high:c][skill_low:c][target_id:d][target_x:h][target_y:h]
+#[cfg(test)]
+const FMT_CCCDHH_ADDR: u32 = 0x008EF060;
+
+/// 「cdhh」格式字串位址(executable .rdata)— 2026-05-13 RE @0x008EF00C 確認 `"cdhh\0"`。
+/// SendPacketData 組 9-byte C_ATTACK / C_FAR_ATTACK packet:
+///   [opcode:c][target_id:d][target_x:h][target_y:h]
+#[cfg(test)]
+const FMT_CDHH_ADDR: u32 = 0x008EF00C;
+
 /// C_SKILL opcode(2026-05-01 capture 確認 = 0x06)。
 const C_SKILL_OPCODE: u8 = 0x06;
+
+/// C_ATTACK opcode(L1J spec + L1JGO Whale server `internal/handler/attack.go` 確認 = 229)。
+/// 對齊「melee 物理攻擊」(劍/拳/匕首)— payload `[D target_id][H x][H y]`,server 端只看
+/// target_id,x/y 忽略(用 server 自己的 player position)。
+#[cfg(test)]
+pub const C_ATTACK_OPCODE: u8 = 229;
+
+/// C_FAR_ATTACK opcode(L1J spec + server 確認 = 123)。
+/// 對齊「ranged 物理攻擊」(弓箭)— payload 跟 C_ATTACK 一樣,差別在 server 端把
+/// `IsMelee = false` 走 ranged 攻擊判定(射程 / 命中率公式不同)。
+#[cfg(test)]
+pub const C_FAR_ATTACK_OPCODE: u8 = 123;
 
 /// `ForceSelfPacket` 專用 shellcode — bypass spell_book_cast,直接組 C_SKILL packet 送
 /// SendPacketData,target=self_char_id。
@@ -587,6 +745,196 @@ fn build_force_target_packet_shellcode(packed_skill_id: u32, target_id: u32) -> 
     sc.extend_from_slice(&[0xFF, 0xD0]);
     // add esp, 0x14
     sc.extend_from_slice(&[0x83, 0xC4, 0x14]);
+    // popad; ret
+    sc.push(0x61);
+    sc.push(0xC3);
+    sc
+}
+
+/// `ForceTargetPacketWithXY` 專用 shellcode — 對齊 0x73CC60..0x73CCB6 路徑送
+/// `cccdhh` C_SKILL packet。
+///
+/// caller 已從 entity `+0x34` 取出 raw_x 並 decode 成 display X(`((raw-0x8000)>>1)+0x8000`),
+/// `+0x38` 直讀為 target_y。shellcode 內部只是把這四個 u32 push 進去組 7-arg call。
+///
+/// asm 對應(對應遊戲 0x73CCAC..0x73CCB6 push 序列):
+/// ```asm
+/// 60                       ; pushad
+/// 68 <target_y>            ; push target_y (innermost = 最後 arg)
+/// 68 <target_x>            ; push target_x
+/// 68 <target_id>           ; push target_id
+/// 68 <skill_low>           ; push skill_low
+/// 68 <skill_high>          ; push skill_high
+/// 6A 06                    ; push 6 (opcode)
+/// 68 <FMT_CCCDHH>          ; push "cccdhh"
+/// B8 <SEND_PACKET_DATA>    ; mov eax, SendPacketData
+/// FF D0                    ; call eax
+/// 83 C4 1C                 ; add esp, 0x1C  (7 args × 4 = 28)
+/// 61                       ; popad
+/// C3                       ; ret
+/// ```
+/// 共 45 bytes(SHELLCODE_SIZE=64 容得下)。
+#[cfg(test)]
+fn build_force_target_packet_xy_shellcode(
+    packed_skill_id: u32,
+    target_id: u32,
+    target_x: u32,
+    target_y: u32,
+) -> Vec<u8> {
+    let skill_low: u32 = packed_skill_id & 7;
+    let skill_high: u32 = packed_skill_id >> 3;
+
+    let mut sc = Vec::with_capacity(45);
+    // pushad
+    sc.push(0x60);
+    // push target_y (innermost = last argument after cccdhh's 6 之後第 6 個)
+    sc.push(0x68);
+    sc.extend_from_slice(&target_y.to_le_bytes());
+    // push target_x
+    sc.push(0x68);
+    sc.extend_from_slice(&target_x.to_le_bytes());
+    // push target_id
+    sc.push(0x68);
+    sc.extend_from_slice(&target_id.to_le_bytes());
+    // push skill_low
+    sc.push(0x68);
+    sc.extend_from_slice(&skill_low.to_le_bytes());
+    // push skill_high
+    sc.push(0x68);
+    sc.extend_from_slice(&skill_high.to_le_bytes());
+    // push 6 (opcode imm8 sign-extend OK)
+    sc.extend_from_slice(&[0x6A, C_SKILL_OPCODE]);
+    // push "cccdhh"
+    sc.push(0x68);
+    sc.extend_from_slice(&FMT_CCCDHH_ADDR.to_le_bytes());
+    // mov eax, SEND_PACKET_DATA
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SEND_PACKET_DATA.to_le_bytes());
+    // call eax
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+    // add esp, 0x1C (7 args × 4 = 28)
+    sc.extend_from_slice(&[0x83, 0xC4, 0x1C]);
+    // popad; ret
+    sc.push(0x61);
+    sc.push(0xC3);
+    sc
+}
+
+/// `execute_attack_packet` 專用 shellcode — 組 9-byte C_ATTACK / C_FAR_ATTACK packet 送
+/// SendPacketData,**完全 bypass** spell_book_cast / 武器系統 / 客戶端動畫。
+///
+/// 為什麼直接送 packet 而不是呼叫客戶端攻擊函數:
+/// - 客戶端攻擊路徑(0x004?????,玩家點怪走的)會做武器射程 / cooldown / 動畫 / 滑鼠
+///   target 解析等一連串前置;從 RemoteThread 進去這些 global 都不對(沒滑鼠 hover)。
+/// - server 端 `HandleAttack` / `HandleFarAttack` 只讀 target_id(x/y 忽略),用 server 自己
+///   的 player position 算射程 + 命中。 直接送 packet 比模擬客戶端流程穩定 10 倍。
+/// - 缺點:沒客戶端動畫(玩家視覺看不出來在打)。 攻擊有效 + server 有送傷害 packet 即可。
+///
+/// asm 對應(對齊 0x73CCAC..0x73CCB6 的 push 序列風格):
+/// ```asm
+/// 60                       ; pushad
+/// 68 <target_y>            ; push target_y (innermost = 最後 arg)
+/// 68 <target_x>            ; push target_x
+/// 68 <target_id>           ; push target_id
+/// 68 <opcode>              ; push opcode (229 / 123)
+/// 68 <FMT_CDHH>            ; push "cdhh"
+/// B8 <SEND_PACKET_DATA>    ; mov eax, SendPacketData
+/// FF D0                    ; call eax
+/// 83 C4 14                 ; add esp, 0x14  (5 args × 4 = 20)
+/// 61                       ; popad
+/// C3                       ; ret
+/// ```
+/// 共 33 bytes(SHELLCODE_SIZE=128 容得下)。
+#[cfg(test)]
+fn build_attack_packet_shellcode(
+    opcode: u8,
+    target_id: u32,
+    target_x: u32,
+    target_y: u32,
+) -> Vec<u8> {
+    let opcode_u32: u32 = opcode as u32;
+
+    let mut sc = Vec::with_capacity(33);
+    // pushad
+    sc.push(0x60);
+    // push target_y (last arg pushed first)
+    sc.push(0x68);
+    sc.extend_from_slice(&target_y.to_le_bytes());
+    // push target_x
+    sc.push(0x68);
+    sc.extend_from_slice(&target_x.to_le_bytes());
+    // push target_id
+    sc.push(0x68);
+    sc.extend_from_slice(&target_id.to_le_bytes());
+    // push opcode (imm32 — 229 > 0x7F,用 imm8 形式 0x6A 會 sign-extend 成 0xFFFFFFE5)
+    sc.push(0x68);
+    sc.extend_from_slice(&opcode_u32.to_le_bytes());
+    // push "cdhh" 字串位址
+    sc.push(0x68);
+    sc.extend_from_slice(&FMT_CDHH_ADDR.to_le_bytes());
+    // mov eax, SEND_PACKET_DATA
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SEND_PACKET_DATA.to_le_bytes());
+    // call eax
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+    // add esp, 0x14 (5 args × 4 = 20)
+    sc.extend_from_slice(&[0x83, 0xC4, 0x14]);
+    // popad; ret
+    sc.push(0x61);
+    sc.push(0xC3);
+    sc
+}
+
+/// `AttackEntity(target_id)` 專用 shellcode — 寫 `[0x97C90C] = target_id` 然後
+/// call `spell_book_cast`,讓 dispatcher 走 `cccdhh` 攻擊路徑、客戶端動畫 + 冷卻自然跑。
+///
+/// shellcode 對應原始 asm:
+/// ```asm
+/// 60                       ; pushad
+/// A1 <ATTACK_TARGET>       ; mov eax, [0x97C90C]        ; save
+/// 50                       ; push eax
+/// C7 05 <ATTACK_TARGET> id ; mov [0x97C90C], target_id
+/// 6A 01                    ; push 1 (byte_flag)
+/// 68 <packed>              ; push packed
+/// 8B 0D <SPELL_BOOK_PTR>   ; mov ecx, [SPELL_BOOK_PTR]
+/// B8 <SPELL_BOOK_CAST>     ; mov eax, SPELL_BOOK_CAST
+/// FF D0                    ; call eax  (thiscall, ret 8 自清)
+/// 58                       ; pop eax
+/// A3 <ATTACK_TARGET>       ; mov [0x97C90C], eax       ; restore
+/// 61 C3                    ; popad; ret
+/// ```
+/// 共 45 bytes(SHELLCODE_SIZE=64 容得下)。
+fn build_attack_entity_shellcode(packed_skill_id: u32, target_id: u32) -> Vec<u8> {
+    let mut sc = Vec::with_capacity(45);
+    // pushad
+    sc.push(0x60);
+    // mov eax, [ATTACK_TARGET_ID_ADDR]
+    sc.push(0xA1);
+    sc.extend_from_slice(&ATTACK_TARGET_ID_ADDR.to_le_bytes());
+    // push eax (save 原 target_id)
+    sc.push(0x50);
+    // mov dword [ATTACK_TARGET], target_id
+    sc.extend_from_slice(&[0xC7, 0x05]);
+    sc.extend_from_slice(&ATTACK_TARGET_ID_ADDR.to_le_bytes());
+    sc.extend_from_slice(&target_id.to_le_bytes());
+    // push 1 (byte_flag)
+    sc.extend_from_slice(&[0x6A, 0x01]);
+    let _ = SPELL_BOOK_BYTE_FLAG;
+    // push packed
+    sc.push(0x68);
+    sc.extend_from_slice(&packed_skill_id.to_le_bytes());
+    // mov ecx, [SPELL_BOOK_PTR]
+    sc.extend_from_slice(&[0x8B, 0x0D]);
+    sc.extend_from_slice(&address::SPELL_BOOK_PTR.to_le_bytes());
+    // mov eax, SPELL_BOOK_CAST
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SPELL_BOOK_CAST.to_le_bytes());
+    // call eax (thiscall, callee ret 8 自清)
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+    // pop eax; mov [ATTACK_TARGET], eax (還原)
+    sc.push(0x58);
+    sc.push(0xA3);
+    sc.extend_from_slice(&ATTACK_TARGET_ID_ADDR.to_le_bytes());
     // popad; ret
     sc.push(0x61);
     sc.push(0xC3);
@@ -719,6 +1067,154 @@ fn build_delete_packet_shellcode(item_obj_id: u32, count: u32) -> Vec<u8> {
 ///    63 64 64 00              ; "cdd\0"  (fmt string,IP-relative)
 /// ```
 /// 共 42 bytes(SHELLCODE_SIZE=64 容得下)。
+/// Direct ordinary item-use packet:
+/// `SendPacketData("cdc", C_USE_ITEM, item_param, 0)`.
+fn build_use_item_packet_shellcode(opcode: u8, item_param: u32) -> Vec<u8> {
+    let mut sc = Vec::with_capacity(42);
+
+    // [0] pushad
+    sc.push(0x60);
+
+    // [1..6] push imm32 0  (arg4: trailing c)
+    sc.push(0x68);
+    sc.extend_from_slice(&0u32.to_le_bytes());
+
+    // [6..11] push imm32 item_param  (arg3: d)
+    sc.push(0x68);
+    sc.extend_from_slice(&item_param.to_le_bytes());
+
+    // [11..16] push imm32 opcode  (arg2: c)
+    sc.push(0x68);
+    sc.extend_from_slice(&(opcode as u32).to_le_bytes());
+
+    // [16..21] call $+5
+    sc.extend_from_slice(&[0xE8, 0x00, 0x00, 0x00, 0x00]);
+
+    // [21] pop esi
+    sc.push(0x5E);
+
+    // [22..25] add esi, disp8
+    let add_esi_pos = sc.len();
+    sc.extend_from_slice(&[0x83, 0xC6, 0x00]);
+
+    // [25] push esi  (arg1: fmt string addr)
+    sc.push(0x56);
+
+    // [26..31] mov eax, SEND_PACKET_DATA
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SEND_PACKET_DATA.to_le_bytes());
+
+    // [31..33] call eax
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+
+    // [33..36] add esp, 0x10
+    sc.extend_from_slice(&[0x83, 0xC4, 0x10]);
+
+    // [36] popad
+    sc.push(0x61);
+
+    // [37] ret
+    sc.push(0xC3);
+
+    // [38..42] "cdc\0"
+    let fmt_pos = sc.len();
+    sc.extend_from_slice(b"cdc\0");
+
+    let disp = (fmt_pos as i32) - 21;
+    debug_assert!((0..=127).contains(&disp));
+    sc[add_esi_pos + 2] = disp as u8;
+
+    sc
+}
+
+/// Direct teleport-scroll C_USE_ITEM packet:
+/// `SendPacketData("cdhhh", C_USE_ITEM, item_param, 4, 0, 0)`.
+///
+/// Matched against manual SendPacketData spy captures from this client:
+/// `op=0xA4 fmt="cdhhh" a3=item_param a4=4 a5=0 a6=0`.
+fn build_teleport_scroll_packet_shellcode(
+    opcode: u8,
+    item_param: u32,
+    teleport_mode: u16,
+    arg5: u16,
+    arg6: u16,
+) -> Vec<u8> {
+    let mut sc = Vec::with_capacity(54);
+
+    sc.push(0x60); // pushad
+
+    sc.push(0x68);
+    sc.extend_from_slice(&(arg6 as u32).to_le_bytes());
+
+    sc.push(0x68);
+    sc.extend_from_slice(&(arg5 as u32).to_le_bytes());
+
+    sc.push(0x68);
+    sc.extend_from_slice(&(teleport_mode as u32).to_le_bytes());
+
+    sc.push(0x68);
+    sc.extend_from_slice(&item_param.to_le_bytes());
+
+    sc.push(0x68);
+    sc.extend_from_slice(&(opcode as u32).to_le_bytes());
+
+    sc.extend_from_slice(&[0xE8, 0x00, 0x00, 0x00, 0x00]);
+    sc.push(0x5E); // pop esi
+
+    let add_esi_pos = sc.len();
+    sc.extend_from_slice(&[0x83, 0xC6, 0x00]);
+
+    sc.push(0x56); // push fmt
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SEND_PACKET_DATA.to_le_bytes());
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+    sc.extend_from_slice(&[0x83, 0xC4, 0x18]);
+    sc.push(0x61);
+    sc.push(0xC3);
+
+    let fmt_pos = sc.len();
+    sc.extend_from_slice(b"cdhhh\0");
+
+    let disp = (fmt_pos as i32) - 31;
+    debug_assert!((0..=127).contains(&disp));
+    sc[add_esi_pos + 2] = disp as u8;
+
+    sc
+}
+
+/// Single-opcode packet: `SendPacketData("c", opcode)`.
+fn build_opcode_only_packet_shellcode(opcode: u8) -> Vec<u8> {
+    let mut sc = Vec::with_capacity(30);
+
+    sc.push(0x60); // pushad
+
+    sc.push(0x68);
+    sc.extend_from_slice(&(opcode as u32).to_le_bytes());
+
+    sc.extend_from_slice(&[0xE8, 0x00, 0x00, 0x00, 0x00]);
+    sc.push(0x5E); // pop esi
+
+    let add_esi_pos = sc.len();
+    sc.extend_from_slice(&[0x83, 0xC6, 0x00]);
+
+    sc.push(0x56); // push fmt
+    sc.push(0xB8);
+    sc.extend_from_slice(&address::SEND_PACKET_DATA.to_le_bytes());
+    sc.extend_from_slice(&[0xFF, 0xD0]);
+    sc.extend_from_slice(&[0x83, 0xC4, 0x08]);
+    sc.push(0x61);
+    sc.push(0xC3);
+
+    let fmt_pos = sc.len();
+    sc.extend_from_slice(b"c\0");
+
+    let disp = (fmt_pos as i32) - 11;
+    debug_assert!((0..=127).contains(&disp));
+    sc[add_esi_pos + 2] = disp as u8;
+
+    sc
+}
+
 fn build_whetstone_packet_shellcode(whetstone_item_param: u32, weapon_item_param: u32) -> Vec<u8> {
     let mut sc = Vec::with_capacity(42);
 
@@ -881,7 +1377,8 @@ fn build_transform_packet_shellcode(scroll_item_param: u32, option_string: &str)
 /// (`"ccs\0"` vs `"cds\0"`)、opcode(`0x88` vs `0xA4`)、第二參(channel `c` vs item_param `d`)。
 /// 4 個 args 在 cdecl 下 stack slot 都 4 bytes,所以 push 寫法不變。
 ///
-/// `message` 為 UTF-8 String,函式內會用 `encoding_rs::BIG5` 編碼後內嵌進 shellcode。
+/// `message` 為 UTF-8 String,函式內會依目前 launcher 文字編碼模式轉成 legacy bytes
+/// 後內嵌進 shellcode。
 /// 字串以 IP-relative `lea` 取得 runtime 位址,無外部記憶體依賴。
 ///
 /// shellcode 對應 asm:
@@ -901,11 +1398,23 @@ fn build_transform_packet_shellcode(scroll_item_param: u32, option_string: &str)
 ///    61                       ; popad
 ///    C3                       ; ret
 /// fmt_pos:    63 63 73 00     ; "ccs\0"
-/// msg_pos:    <Big5 bytes>... 00
+/// msg_pos:    <Big5/GBK bytes>... 00
 /// ```
 ///
-/// 共 43B prefix + 4B fmt + (Big5 message + null) bytes。
+/// 共 43B prefix + 4B fmt + (message bytes + null) bytes。
 fn build_chat_packet_shellcode(channel: u8, message: &str) -> Vec<u8> {
+    build_chat_packet_shellcode_with_mode(
+        channel,
+        message,
+        crate::legacy_text::text_encoding_mode(),
+    )
+}
+
+fn build_chat_packet_shellcode_with_mode(
+    channel: u8,
+    message: &str,
+    mode: crate::legacy_text::TextEncodingMode,
+) -> Vec<u8> {
     use crate::aux::address::C_CHAT_OPCODE;
 
     let mut sc = Vec::with_capacity(64);
@@ -963,10 +1472,10 @@ fn build_chat_packet_shellcode(channel: u8, message: &str) -> Vec<u8> {
     let fmt_pos = sc.len();
     sc.extend_from_slice(b"ccs\0");
 
-    // [47..] Big5(message) + '\0'
+    // [47..] legacy encoded message + '\0'
     let msg_pos = sc.len();
-    let (big5, _, _) = encoding_rs::BIG5.encode(message);
-    sc.extend_from_slice(&big5);
+    let message_bytes = encode_chat_message_bytes(message, mode);
+    sc.extend_from_slice(&message_bytes);
     sc.push(0);
 
     // ── Patch lea displacements ──
@@ -977,6 +1486,16 @@ fn build_chat_packet_shellcode(channel: u8, message: &str) -> Vec<u8> {
     sc[msg_lea_pos..msg_lea_pos + 4].copy_from_slice(&msg_disp.to_le_bytes());
 
     sc
+}
+
+fn encode_chat_message_bytes(message: &str, mode: crate::legacy_text::TextEncodingMode) -> Vec<u8> {
+    let encoding = match mode {
+        crate::legacy_text::TextEncodingMode::Gbk => crate::legacy_text::LegacyEncoding::Gbk,
+        crate::legacy_text::TextEncodingMode::Auto | crate::legacy_text::TextEncodingMode::Big5 => {
+            crate::legacy_text::LegacyEncoding::Big5
+        }
+    };
+    crate::legacy_text::encode_text(message, encoding)
 }
 
 #[cfg(test)]
@@ -1183,6 +1702,75 @@ mod tests {
         assert_eq!(&sc[7..11], &0x12345678u32.to_le_bytes());
     }
 
+    #[test]
+    fn use_item_packet_shellcode_layout() {
+        let item_param = 0x1DCD_6AA8_u32;
+        let sc = build_use_item_packet_shellcode(0x12, item_param);
+
+        assert_eq!(sc.len(), 42);
+        // arg4: trailing c = 0
+        assert_eq!(sc[1], 0x68);
+        assert_eq!(&sc[2..6], &0u32.to_le_bytes());
+        // arg3: item_param
+        assert_eq!(sc[6], 0x68);
+        assert_eq!(&sc[7..11], &item_param.to_le_bytes());
+        // arg2: C_USE_ITEM opcode
+        assert_eq!(sc[11], 0x68);
+        assert_eq!(&sc[12..16], &0x12u32.to_le_bytes());
+        // SendPacketData and cdecl cleanup
+        assert_eq!(sc[26], 0xB8);
+        assert_eq!(&sc[27..31], &address::SEND_PACKET_DATA.to_le_bytes());
+        assert_eq!(&sc[31..33], &[0xFF, 0xD0]);
+        assert_eq!(&sc[33..36], &[0x83, 0xC4, 0x10]);
+        assert_eq!(&sc[38..42], b"cdc\0");
+    }
+
+    #[test]
+    fn teleport_scroll_packet_shellcode_layout() {
+        let item_param = 0x1DCD_6AA8_u32;
+        let sc = build_teleport_scroll_packet_shellcode(0xA4, item_param, 4, 0, 0);
+
+        assert_eq!(sc.len(), 54);
+        // arg6: unused = 0.
+        assert_eq!(sc[1], 0x68);
+        assert_eq!(&sc[2..6], &0u32.to_le_bytes());
+        // arg5: unused = 0.
+        assert_eq!(sc[6], 0x68);
+        assert_eq!(&sc[7..11], &0u32.to_le_bytes());
+        // arg4: teleport mode observed from manual scroll use.
+        assert_eq!(sc[11], 0x68);
+        assert_eq!(&sc[12..16], &4u32.to_le_bytes());
+        // arg3: item_param.
+        assert_eq!(sc[16], 0x68);
+        assert_eq!(&sc[17..21], &item_param.to_le_bytes());
+        // arg2: C_USE_ITEM opcode.
+        assert_eq!(sc[21], 0x68);
+        assert_eq!(&sc[22..26], &0xA4u32.to_le_bytes());
+        // SendPacketData and cdecl cleanup for six args.
+        assert_eq!(sc[36], 0xB8);
+        assert_eq!(&sc[37..41], &address::SEND_PACKET_DATA.to_le_bytes());
+        assert_eq!(&sc[41..43], &[0xFF, 0xD0]);
+        assert_eq!(&sc[43..46], &[0x83, 0xC4, 0x18]);
+        assert_eq!(&sc[48..54], b"cdhhh\0");
+    }
+
+    #[test]
+    fn opcode_only_packet_shellcode_layout() {
+        let sc = build_opcode_only_packet_shellcode(0x34);
+
+        assert_eq!(sc.len(), 30);
+        assert_eq!(sc[0], 0x60);
+        // arg2: opcode.
+        assert_eq!(sc[1], 0x68);
+        assert_eq!(&sc[2..6], &0x34u32.to_le_bytes());
+        // SendPacketData and cdecl cleanup for two args.
+        assert_eq!(sc[16], 0xB8);
+        assert_eq!(&sc[17..21], &address::SEND_PACKET_DATA.to_le_bytes());
+        assert_eq!(&sc[21..23], &[0xFF, 0xD0]);
+        assert_eq!(&sc[23..26], &[0x83, 0xC4, 0x08]);
+        assert_eq!(&sc[28..30], b"c\0");
+    }
+
     /// ForceSelfPacket layout — 對應 0x73C2A0 路徑的 7-byte C_SKILL packet。
     /// shellcode 36 bytes:1(pushad) + 6(push [SELF]) + 5(push low) + 5(push high)
     /// + 2(push 6) + 5(push fmt) + 5(mov eax,SP) + 2(call) + 3(add esp) + 1(popad) + 1(ret)
@@ -1256,6 +1844,113 @@ mod tests {
         assert_eq!(sc[34], 0xC3);
     }
 
+    /// AttackEntity layout — 寫 `[0x97C90C] = target_id` 後 call `spell_book_cast`。
+    /// 45 bytes:1(pushad) + 5(mov eax,[ATTACK_TARGET]) + 1(push eax)
+    ///        + 10(mov [ATTACK_TARGET], imm32) + 2(push 1) + 5(push packed)
+    ///        + 6(mov ecx, [SPELL_BOOK_PTR]) + 5(mov eax, SPELL_BOOK_CAST)
+    ///        + 2(call eax) + 1(pop eax) + 5(mov [ATTACK_TARGET], eax) + 1+1(popad+ret)
+    #[test]
+    fn skill_shellcode_attack_entity_layout() {
+        let target_id = 0xCAFEBABE_u32;
+        let sc = build_skill_shellcode(42, SkillTargetMode::AttackEntity(target_id));
+        assert_eq!(sc.len(), 45, "AttackEntity shellcode 必須 45 bytes");
+
+        // pushad
+        assert_eq!(sc[0], 0x60);
+        // mov eax, [ATTACK_TARGET]
+        assert_eq!(sc[1], 0xA1);
+        assert_eq!(&sc[2..6], &ATTACK_TARGET_ID_ADDR.to_le_bytes());
+        // push eax
+        assert_eq!(sc[6], 0x50);
+        // mov dword [ATTACK_TARGET], target_id
+        assert_eq!(&sc[7..9], &[0xC7, 0x05]);
+        assert_eq!(&sc[9..13], &ATTACK_TARGET_ID_ADDR.to_le_bytes());
+        assert_eq!(&sc[13..17], &target_id.to_le_bytes());
+        // push 1 (byte_flag)
+        assert_eq!(&sc[17..19], &[0x6A, 0x01]);
+        // push packed (42)
+        assert_eq!(sc[19], 0x68);
+        assert_eq!(&sc[20..24], &42u32.to_le_bytes());
+        // mov ecx, [SPELL_BOOK_PTR]
+        assert_eq!(&sc[24..26], &[0x8B, 0x0D]);
+        assert_eq!(&sc[26..30], &address::SPELL_BOOK_PTR.to_le_bytes());
+        // mov eax, SPELL_BOOK_CAST
+        assert_eq!(sc[30], 0xB8);
+        assert_eq!(&sc[31..35], &address::SPELL_BOOK_CAST.to_le_bytes());
+        // call eax
+        assert_eq!(&sc[35..37], &[0xFF, 0xD0]);
+        // pop eax; mov [ATTACK_TARGET], eax
+        assert_eq!(sc[37], 0x58);
+        assert_eq!(sc[38], 0xA3);
+        assert_eq!(&sc[39..43], &ATTACK_TARGET_ID_ADDR.to_le_bytes());
+        // popad; ret
+        assert_eq!(sc[43], 0x61);
+        assert_eq!(sc[44], 0xC3);
+    }
+
+    /// ATTACK_TARGET_ID_ADDR 必須對齊 RE 結果:0x97C90C(不是 TARGET_ID_ADDR 的 0x97C910)。
+    #[test]
+    fn attack_target_id_addr_is_0x97c90c() {
+        assert_eq!(ATTACK_TARGET_ID_ADDR, 0x0097C90C);
+        assert_ne!(ATTACK_TARGET_ID_ADDR, TARGET_ID_ADDR);
+    }
+
+    /// ForceTargetPacketWithXY layout — 對齊 0x73CC60..0x73CCB6 cccdhh send path。
+    /// 45 bytes:1(pushad) + 5×5(push y/x/target/low/high) + 2(push 6) + 5(push fmt)
+    ///        + 5(mov eax) + 2(call) + 3(add esp 0x1C) + 1(popad) + 1(ret)
+    #[test]
+    fn skill_shellcode_force_target_packet_xy_layout() {
+        let target_id = 0xCAFEBABE_u32;
+        let target_x = 0x000080FE_u32;
+        let target_y = 0x000082C7_u32;
+        let sc = build_skill_shellcode(
+            42,
+            SkillTargetMode::ForceTargetPacketWithXY {
+                target_id,
+                target_x,
+                target_y,
+            },
+        );
+        assert_eq!(
+            sc.len(),
+            45,
+            "ForceTargetPacketWithXY shellcode 必須 45 bytes"
+        );
+
+        // pushad
+        assert_eq!(sc[0], 0x60);
+        // push target_y (最內層 = SendPacketData 最後 arg)
+        assert_eq!(sc[1], 0x68);
+        assert_eq!(&sc[2..6], &target_y.to_le_bytes());
+        // push target_x
+        assert_eq!(sc[6], 0x68);
+        assert_eq!(&sc[7..11], &target_x.to_le_bytes());
+        // push target_id
+        assert_eq!(sc[11], 0x68);
+        assert_eq!(&sc[12..16], &target_id.to_le_bytes());
+        // push skill_low (42 & 7 = 2)
+        assert_eq!(sc[16], 0x68);
+        assert_eq!(&sc[17..21], &2u32.to_le_bytes());
+        // push skill_high (42 >> 3 = 5)
+        assert_eq!(sc[21], 0x68);
+        assert_eq!(&sc[22..26], &5u32.to_le_bytes());
+        // push 6 opcode
+        assert_eq!(&sc[26..28], &[0x6A, 0x06]);
+        // push "cccdhh" addr
+        assert_eq!(sc[28], 0x68);
+        assert_eq!(&sc[29..33], &FMT_CCCDHH_ADDR.to_le_bytes());
+        // mov eax, SEND_PACKET_DATA
+        assert_eq!(sc[33], 0xB8);
+        assert_eq!(&sc[34..38], &address::SEND_PACKET_DATA.to_le_bytes());
+        // call eax
+        assert_eq!(&sc[38..40], &[0xFF, 0xD0]);
+        // add esp, 0x1C
+        assert_eq!(&sc[40..43], &[0x83, 0xC4, 0x1C]);
+        // popad; ret
+        assert_eq!(sc[43], 0x61);
+        assert_eq!(sc[44], 0xC3);
+    }
+
     #[test]
     fn chat_packet_shellcode_layout() {
         let sc = build_chat_packet_shellcode(0x02, "test msg");
@@ -1277,12 +1972,33 @@ mod tests {
     #[test]
     fn chat_packet_shellcode_big5_encodes_chinese() {
         // 中文訊息應以 Big5 編碼進入 shellcode(不是 UTF-8)
-        let sc = build_chat_packet_shellcode(0x02, "測試");
+        let sc = build_chat_packet_shellcode_with_mode(
+            0x02,
+            "測試",
+            crate::legacy_text::TextEncodingMode::Big5,
+        );
         // Big5: 測 = 0xB4 0xFA, 試 = 0xB8 0xD5
         let big5 = [0xB4u8, 0xFA, 0xB8, 0xD5];
         assert!(
             sc.windows(big5.len()).any(|w| w == big5),
             "shellcode 內找不到 '測試' Big5 bytes,檢查 encoding_rs 用法"
+        );
+    }
+
+    #[test]
+    fn chat_packet_shellcode_gbk_mode_encodes_simplified_chinese_as_gbk() {
+        let sc = build_chat_packet_shellcode_with_mode(
+            0x00,
+            "服务器",
+            crate::legacy_text::TextEncodingMode::Gbk,
+        );
+
+        let (gbk, _, had_errors) = encoding_rs::GBK.encode("服务器");
+        assert!(!had_errors);
+        let gbk = gbk.into_owned();
+        assert!(
+            sc.windows(gbk.len()).any(|w| w == gbk.as_slice()),
+            "GBK mode chat shellcode should embed simplified Chinese as GBK bytes"
         );
     }
 }

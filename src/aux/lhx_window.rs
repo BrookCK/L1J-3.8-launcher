@@ -192,6 +192,10 @@ fn should_clear_lhx_topmost_after_owner_attached(has_game_owner: bool) -> bool {
     has_game_owner
 }
 
+fn should_attach_lhx_to_game_owner() -> bool {
+    false
+}
+
 fn desired_lhx_visibility(visible_flag: u8, game_minimized: bool) -> Option<bool> {
     match visible_flag {
         VISIBLE_HIDDEN => Some(false),
@@ -215,6 +219,10 @@ fn set_combo_dropdown_visible_rows(combo: &nwg::ComboBox<String>, item_count: us
 
 fn set_delete_combo_dropdown_visible_rows(combo: &nwg::ComboBox<String>, item_count: usize) {
     set_combo_dropdown_visible_rows_to(combo, delete_combo_dropdown_visible_rows(item_count));
+}
+
+fn delete_list_entry_name(name: &str) -> String {
+    strip_qty(name).to_string()
 }
 
 fn set_combo_dropdown_visible_rows_to(combo: &nwg::ComboBox<String>, rows: usize) {
@@ -1667,7 +1675,7 @@ impl LhxWindow {
             &self.delete_listbox
         };
         let mut list = listbox.collection().to_vec();
-        list.push(text);
+        list.push(delete_list_entry_name(&text));
         listbox.set_collection(list);
         self.write_delete_lists();
     }
@@ -1803,7 +1811,11 @@ impl LhxWindow {
             let cur_head = cb(&self.misc_show_attack_dmg_cb);
             let cur_feet = cb(&self.misc_damage_at_feet_cb);
             let (final_head, final_feet) = if cur_head && cur_feet {
-                if !prev_head { (true, false) } else { (false, true) }
+                if !prev_head {
+                    (true, false)
+                } else {
+                    (false, true)
+                }
             } else {
                 (cur_head, cur_feet)
             };
@@ -2666,7 +2678,7 @@ pub(crate) fn extract_polymorph_option(raw: &str) -> &str {
 /// 把 `[AllPolymorphs]` INI 條目抽 sprite_id(鎖定變身比對用)。
 ///
 /// 找不到合法 spr_id → 回 0(未來鎖定變身觸發時把 0 當「不比對」)。
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn extract_polymorph_spr_id(raw: &str) -> u32 {
     let parts: Vec<&str> = raw.splitn(3, '_').collect();
     if parts.len() == 3 {
@@ -2737,7 +2749,7 @@ pub(crate) fn clean_item_name(name: &str) -> &str {
 /// - 狀態頁:`/KEY=F<n>` `/DKEY=F<n>`
 /// - 無字尾 = 物品 USE_ITEM
 pub(crate) fn parse_buff_item(raw: &str) -> crate::aux::runtime::BuffItem {
-    use crate::aux::runtime::{BuffItem, CastTarget};
+    use crate::aux::runtime::BuffItem;
     let trimmed = raw.trim();
 
     // 偵測 legacy 格式(有 '/'):`<id>_<name>/<suffix>` → 自動 migration 成 native 等價
@@ -3232,44 +3244,44 @@ pub fn spawn_window_thread(
         app.force_hide_window();
         app.visible_timer.start();
 
-        // 設 LHX 為遊戲視窗的 owned window:LHX 隨遊戲最小化、不獨立進
-        // taskbar、永遠在遊戲之上 — 視覺上「嵌在遊戲內」。失敗時退回
-        // topmost(視窗 builder 已給的 WS_EX_TOPMOST)獨立模式。
-        unsafe {
-            use windows::core::PCWSTR;
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::WindowsAndMessaging::{
-                FindWindowW, SetWindowLongW, SetWindowPos, GWLP_HWNDPARENT, HWND_NOTOPMOST,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            };
-            let title: Vec<u16> = "Lineage Windows Client (13081901)\0"
-                .encode_utf16()
-                .collect();
-            match FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) {
-                Ok(game_hwnd) if !game_hwnd.is_invalid() => {
-                    game_hwnd_clone.store(game_hwnd.0 as usize, Ordering::Relaxed);
-                    if let Some(nwg_hwnd) = app.window.handle.hwnd() {
-                        let lhx_hwnd = HWND(nwg_hwnd as *mut _);
-                        SetWindowLongW(lhx_hwnd, GWLP_HWNDPARENT, game_hwnd.0 as i32);
-                        if should_clear_lhx_topmost_after_owner_attached(true) {
-                            let _ = SetWindowPos(
-                                lhx_hwnd,
-                                Some(HWND_NOTOPMOST),
-                                0,
-                                0,
-                                0,
-                                0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        // 設 LHX 為遊戲視窗的 owned window 曾在部分環境觸發遊戲視窗被放大。
+        // 先保守維持獨立 topmost 視窗，不再改遊戲 HWND parent/owner。
+        if should_attach_lhx_to_game_owner() {
+            unsafe {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SetWindowLongW, SetWindowPos, GWLP_HWNDPARENT, HWND_NOTOPMOST, SWP_NOACTIVATE,
+                    SWP_NOMOVE, SWP_NOSIZE,
+                };
+                // 多開安全:走 game_window cache。 cache miss fallback 老 FindWindowW(早期 boot 不破)。
+                match crate::aux::game_window::cached_or_find_game_hwnd() {
+                    Some(game_hwnd) if !game_hwnd.is_invalid() => {
+                        game_hwnd_clone.store(game_hwnd.0 as usize, Ordering::Relaxed);
+                        if let Some(nwg_hwnd) = app.window.handle.hwnd() {
+                            let lhx_hwnd = HWND(nwg_hwnd as *mut _);
+                            SetWindowLongW(lhx_hwnd, GWLP_HWNDPARENT, game_hwnd.0 as i32);
+                            if should_clear_lhx_topmost_after_owner_attached(true) {
+                                let _ = SetWindowPos(
+                                    lhx_hwnd,
+                                    Some(HWND_NOTOPMOST),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                                );
+                            }
+                            log_line!(
+                                "[lhx] 設為遊戲視窗 owned window (game HWND={:?})",
+                                game_hwnd.0
                             );
                         }
-                        log_line!(
-                            "[lhx] 設為遊戲視窗 owned window (game HWND={:?})",
-                            game_hwnd.0
-                        );
                     }
+                    _ => log_line!("[lhx] 找不到遊戲視窗,維持 topmost 獨立模式"),
                 }
-                _ => log_line!("[lhx] 找不到遊戲視窗,維持 topmost 獨立模式"),
             }
+        } else {
+            log_line!("[lhx] owned window attach disabled; using standalone topmost mode");
         }
         if visible_clone.load(Ordering::Relaxed) == VISIBLE_HIDDEN {
             app.force_hide_window();
@@ -3348,6 +3360,11 @@ mod ui_layout_tests {
     }
 
     #[test]
+    fn lhx_owner_attach_is_disabled_for_game_window_stability() {
+        assert!(!super::should_attach_lhx_to_game_owner());
+    }
+
+    #[test]
     fn lhx_temporarily_hides_while_owned_game_window_is_minimized() {
         assert_eq!(
             super::desired_lhx_visibility(super::VISIBLE_SHOWN, true),
@@ -3373,6 +3390,20 @@ mod ui_layout_tests {
         assert_eq!(super::delete_combo_dropdown_visible_rows(15), 15);
         assert_eq!(super::delete_combo_dropdown_visible_rows(50), 50);
         assert_eq!(super::delete_combo_dropdown_visible_rows(70), 50);
+    }
+
+    #[test]
+    fn delete_list_entry_name_strips_stack_quantity_before_saving() {
+        assert_eq!(super::delete_list_entry_name("肉 (191)"), "肉");
+        assert_eq!(super::delete_list_entry_name("金幣 (17,099)"), "金幣");
+    }
+
+    #[test]
+    fn delete_list_entry_name_keeps_non_count_parentheses() {
+        assert_eq!(
+            super::delete_list_entry_name("精靈水晶(水之元氣)"),
+            "精靈水晶(水之元氣)"
+        );
     }
 }
 
@@ -3627,7 +3658,10 @@ mod parser_tests {
             ("復活卷軸_-1_IT", "-1_復活卷軸/IT"),
             // /IME 對自己施放卷軸 — legacy + Native 都轉回 legacy /IME
             ("0_魔法卷軸 (初級治癒術)/IME", "0_魔法卷軸 (初級治癒術)/IME"),
-            ("魔法卷軸 (初級治癒術)_-1_IME", "-1_魔法卷軸 (初級治癒術)/IME"),
+            (
+                "魔法卷軸 (初級治癒術)_-1_IME",
+                "-1_魔法卷軸 (初級治癒術)/IME",
+            ),
         ];
         for (raw, expected) in cases {
             let b = parse_buff_item(raw);

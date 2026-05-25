@@ -8,10 +8,4 @@ use windows::Win32::Foundation::HANDLE;
 pub trait Toggle {
     fn enable(&self, h: HANDLE) -> anyhow::Result<()>;
     fn disable(&self, h: HANDLE) -> anyhow::Result<()>;
-    fn is_safe(&self) -> bool {
-        true
-    }
-    fn name(&self) -> &'static str {
-        ""
-    }
 }

@@ -185,6 +185,34 @@ pub(crate) fn strip_paren_suffix(name: &str) -> &str {
     trimmed
 }
 
+/// 從 spell record 名稱的 `(mp/range[/level])` 字尾解出 range(第二個數字,單位 = tile)。
+///
+/// 例:
+/// - 「烈炎術 (20/3)」→ Some(3)
+/// - 「加速術 (40/0)」→ Some(0)(自身 buff,沒射程概念)
+/// - 「魔法相剋術 (40/0/2)」→ Some(0)
+/// - 「三重矢(15/8)」→ Some(8)(無空格也接)
+///
+/// 規則沿用 [`strip_paren_suffix`]:括號內必須全是數字 / `/` / 空白。
+/// 字尾不符 / 無括號 → None;括號內只有一個數字 → None。
+pub(crate) fn parse_range_from_suffix(name: &str) -> Option<u32> {
+    let trimmed = name.trim();
+    let open = trimmed.rfind('(')?;
+    let close_rel = trimmed[open..].rfind(')')?;
+    let inner = &trimmed[open + 1..open + close_rel];
+    if inner.is_empty()
+        || !inner
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'/' || b == b' ')
+    {
+        return None;
+    }
+    inner
+        .split('/')
+        .nth(1)
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +261,39 @@ mod tests {
     fn strip_paren_suffix_non_numeric() {
         // 括號內含中文,不剝
         assert_eq!(strip_paren_suffix("怪怪 (測試)"), "怪怪 (測試)");
+    }
+
+    #[test]
+    fn parse_range_basic() {
+        // 第二個數字就是 range
+        assert_eq!(parse_range_from_suffix("烈炎術 (20/3)"), Some(3));
+        assert_eq!(parse_range_from_suffix("加速術 (40/0)"), Some(0));
+        assert_eq!(parse_range_from_suffix("光箭 (15/8)"), Some(8));
+    }
+
+    #[test]
+    fn parse_range_three_segment_format() {
+        // (mp/range/level) — 第二個仍是 range
+        assert_eq!(parse_range_from_suffix("魔法相剋術 (40/0/2)"), Some(0));
+        assert_eq!(parse_range_from_suffix("造痕術 (5/80/1)"), Some(80));
+    }
+
+    #[test]
+    fn parse_range_no_space_before_paren() {
+        // 妖精物理系格式跟魔法系一致
+        assert_eq!(parse_range_from_suffix("三重矢(15/8)"), Some(8));
+        assert_eq!(parse_range_from_suffix("集中射(10/0/1)"), Some(0));
+    }
+
+    #[test]
+    fn parse_range_returns_none_for_invalid() {
+        // 沒字尾
+        assert_eq!(parse_range_from_suffix("加速術"), None);
+        // 只有一個數字(沒 range)
+        assert_eq!(parse_range_from_suffix("怪怪 (20)"), None);
+        // 括號內非數字(不該被當 mp/range)
+        assert_eq!(parse_range_from_suffix("怪怪 (測試)"), None);
+        // 空字串
+        assert_eq!(parse_range_from_suffix(""), None);
     }
 }

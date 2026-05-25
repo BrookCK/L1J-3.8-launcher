@@ -23,14 +23,6 @@ fn to_wide_null(value: &str) -> Vec<u16> {
 ///
 /// suspended=true: CREATE_SUSPENDED（安裝 hook 用，呼叫方需自行 ResumeThread）
 /// suspended=false: 正常啟動
-pub fn create_game(
-    exe_path: &str,
-    work_dir: &str,
-    suspended: bool,
-) -> Result<(HANDLE, HANDLE, u32)> {
-    create_game_with_args(exe_path, work_dir, suspended, None)
-}
-
 pub fn create_game_with_args(
     exe_path: &str,
     work_dir: &str,

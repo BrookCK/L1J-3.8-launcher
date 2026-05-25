@@ -15,8 +15,6 @@ pub struct PlayerState {
     pub max_mp: u32,
     pub food: u8,
     pub weight: u8,
-    pub food_raw: u8,
-    pub weight_raw: u8,
     pub map_id: u32,
 }
 
@@ -58,8 +56,6 @@ pub fn read_player_state(h: HANDLE) -> Result<PlayerState> {
         max_mp,
         food: ((food_raw as u32) * 100 / FOOD_LEVEL_DIVISOR) as u8,
         weight: ((weight_raw as u32) * 100 / WEIGHT_DIVISOR) as u8,
-        food_raw,
-        weight_raw,
         map_id,
     })
 }

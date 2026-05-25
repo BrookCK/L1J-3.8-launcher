@@ -160,7 +160,7 @@ pub fn list_items(h: HANDLE) -> Result<Vec<Item>> {
 }
 
 /// 找出第一個符合條件的物品 — 給後續 drink_hp/mp 用
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn find_item<F>(h: HANDLE, pred: F) -> Result<Option<Item>>
 where
     F: Fn(&Item) -> bool,
@@ -169,13 +169,14 @@ where
 }
 
 /// 透過 item_param 查物品(對應 FUN_004B1E50)
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn find_by_param(h: HANDLE, item_param: u32) -> Result<Option<Item>> {
     find_item(h, |it| it.item_param == item_param)
 }
 
 /// 完整 raw dump — 不過濾,印每個 item_entry 前 64 bytes 含 hex + ASCII + UTF-16 name 嘗試。
 /// 給診斷反向工程結構用。
+#[cfg(test)]
 pub fn dump_raw(h: HANDLE) -> Result<()> {
     use crate::log_line;
     let inv = match read_inventory_ptr(h)? {
@@ -262,6 +263,7 @@ pub fn dump_raw(h: HANDLE) -> Result<()> {
 ///
 /// 用於 INVENTORY_BASE 位址不確定時的診斷:讀 candidate → 解一層 → 看 [+0x2C]/[+0x58]
 /// 是否符合 inventory layout(count 1..=512, array_ptr 在 heap)。
+#[cfg(test)]
 pub fn probe_candidates(h: HANDLE, candidates: &[(u32, &str)]) -> Vec<String> {
     let mut out = Vec::new();
     for &(addr, name) in candidates {
@@ -283,6 +285,7 @@ pub fn probe_candidates(h: HANDLE, candidates: &[(u32, &str)]) -> Vec<String> {
 /// - `[item0+0x0C]` = name_ptr 指向可讀字串(關鍵 — 確認是 item_entry)
 ///
 /// 只回傳通過「name 預覽」的候選,大幅降噪。
+#[cfg(test)]
 pub fn scan_data_for_inventory(h: HANDLE) -> Vec<String> {
     let mut hits = Vec::new();
     let mut seen_ptrs = std::collections::HashSet::new();
@@ -340,6 +343,7 @@ pub fn scan_data_for_inventory(h: HANDLE) -> Vec<String> {
     hits
 }
 
+#[cfg(test)]
 fn probe_one(h: HANDLE, base_addr: u32) -> Result<String> {
     let inv = read_u32(h, base_addr).with_context(|| format!("read [{:08X}]", base_addr))?;
     if inv < 0x0010_0000 {

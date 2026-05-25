@@ -1,83 +1,40 @@
-use std::sync::{mpsc, Mutex, OnceLock};
-
-type SenderList = Mutex<Vec<mpsc::Sender<String>>>;
-static LOG_TX: OnceLock<SenderList> = OnceLock::new();
-
 const LOG_FILE: &str = "launcher_debug.log";
 const STARTUP_DIAG_FILE: &str = "launcher_startup_timing.log";
 const WRITE_LOGS_ENV: &str = "LOGIN38_WRITE_LOGS";
 
-fn senders() -> &'static SenderList {
-    LOG_TX.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-pub fn subscribe() -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel();
-    if let Ok(mut v) = senders().lock() {
-        v.push(tx);
-    }
-    rx
-}
-
-#[allow(dead_code)]
-pub fn init_channel() -> mpsc::Receiver<String> {
-    subscribe()
-}
-
 pub fn log(msg: String) {
-    let startup_diag = is_startup_diag_message(&msg);
-    if !logs_enabled() && !startup_diag {
-        let _ = msg;
-        return;
+    if file_logs_enabled() {
+        let file_name = if is_startup_diag_message(&msg) {
+            STARTUP_DIAG_FILE
+        } else {
+            LOG_FILE
+        };
+        write_log_file(file_name, &msg);
     }
-
-    let file_name = if startup_diag {
-        STARTUP_DIAG_FILE
-    } else {
-        LOG_FILE
-    };
-    write_log_file(file_name, &msg);
 
     if cfg!(feature = "verbose-log") {
         println!("{msg}");
     }
-
-    if let Ok(mut v) = senders().lock() {
-        v.retain(|tx| tx.send(msg.clone()).is_ok());
-    }
 }
 
-fn logs_enabled() -> bool {
-    logs_enabled_from_env(
+fn file_logs_enabled() -> bool {
+    file_logs_enabled_from_env(
         cfg!(feature = "verbose-log"),
         std::env::var(WRITE_LOGS_ENV).ok().as_deref(),
     )
 }
 
-fn logs_enabled_from_env(verbose_log: bool, env_value: Option<&str>) -> bool {
-    // 預設開啟(寫入 launcher_debug.log),只有顯式設 LOGIN38_WRITE_LOGS=0/false/no/off 才關閉。
-    // 過去預設 off 造成 smooth_run_hook / poison_hook / FileHook 等非 startup_diag 訊息
-    // 完全消失,debug 起來困難。
+fn file_logs_enabled_from_env(verbose_log: bool, env_value: Option<&str>) -> bool {
     if verbose_log {
         return true;
     }
-    match env_value {
-        Some(v) if is_falsy_env(v) => false,
-        _ => true,
-    }
+    env_value.is_some_and(is_truthy_env)
 }
 
 fn is_truthy_env(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
-    )
-}
-
-fn is_falsy_env(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "off"
     )
 }
 
@@ -133,24 +90,23 @@ pub(crate) use log_line;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn logs_are_enabled_by_default_when_env_unset() {
-        // 預設開啟(寫 launcher_debug.log),需顯式關閉才停。
-        assert!(super::logs_enabled_from_env(false, None));
-        assert!(super::logs_enabled_from_env(false, Some("1")));
-        assert!(super::logs_enabled_from_env(false, Some("true")));
-        assert!(super::logs_enabled_from_env(true, None));
+    fn file_logs_are_disabled_by_default_when_env_unset() {
+        assert!(!super::file_logs_enabled_from_env(false, None));
+        assert!(super::file_logs_enabled_from_env(false, Some("1")));
+        assert!(super::file_logs_enabled_from_env(false, Some("true")));
+        assert!(super::file_logs_enabled_from_env(true, None));
     }
 
     #[test]
-    fn logs_can_be_explicitly_disabled_via_env() {
-        assert!(!super::logs_enabled_from_env(false, Some("0")));
-        assert!(!super::logs_enabled_from_env(false, Some("false")));
-        assert!(!super::logs_enabled_from_env(false, Some("no")));
-        assert!(!super::logs_enabled_from_env(false, Some("off")));
+    fn file_logs_stay_disabled_for_falsy_env() {
+        assert!(!super::file_logs_enabled_from_env(false, Some("0")));
+        assert!(!super::file_logs_enabled_from_env(false, Some("false")));
+        assert!(!super::file_logs_enabled_from_env(false, Some("no")));
+        assert!(!super::file_logs_enabled_from_env(false, Some("off")));
     }
 
     #[test]
-    fn startup_diag_messages_are_still_classified_when_logging_is_enabled() {
+    fn startup_diag_messages_are_still_classified_when_file_logging_is_enabled() {
         assert!(super::is_startup_diag_message("[stage2] all patches done"));
         assert!(super::is_startup_diag_message(
             "[launch-time] launch_game start"
