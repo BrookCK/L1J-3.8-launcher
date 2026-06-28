@@ -3,6 +3,9 @@
 **/target/
 **/*.rs.bk
 *.pdb
+/ddraw_inproc/build/*.obj
+/ddraw_inproc/build/*.exp
+/ddraw_inproc/build/*.lib
 
 # Game assets (copyright NCsoft, do not redistribute)
 TW13081901.bin
